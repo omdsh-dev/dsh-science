@@ -17,8 +17,15 @@ Sources: contracts in [`definition.ts`](../../packages/session/session-projectio
  * `init`, `apply`, `view`, and any private-state validation.
  */
 interface ProjectionDefinition<K extends keyof SessionProjectionMap, S> {
-  /** The projection key this unit owns. */
+  /** The non-empty projection key this unit owns. */
   key: K
+  /**
+   * Process-local identity of this exact definition family. Use one
+   * module-private `Symbol()` for definitions whose functions and schemas are
+   * interchangeable across repeated composition. Do not use `Symbol.for()` or
+   * reuse a token across instance-configured semantics.
+   */
+  definitionToken: symbol
   /** Validates the wire payload (`view` output) before it leaves the host. */
   schema: ZodType<SessionProjectionMap[K]>
   /**
