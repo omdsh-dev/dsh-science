@@ -172,6 +172,31 @@
       "source": "packages/goal/goal/src/types.ts"
     },
     {
+      "doc": "docs/subsystems/science.md",
+      "symbol": "ScienceModeRef",
+      "source": "packages/science/science-session/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/science.md",
+      "symbol": "ScienceEnvironmentBinding",
+      "source": "packages/science/science-session/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/science.md",
+      "symbol": "ScienceRun",
+      "source": "packages/science/science-session/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/science.md",
+      "symbol": "ScienceEvidenceRef",
+      "source": "packages/science/science-session/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/science.md",
+      "symbol": "ScienceProjection",
+      "source": "packages/science/science-session/src/types.ts"
+    },
+    {
       "doc": "docs/subsystems/goal.md",
       "symbol": "GoalPhase",
       "source": "packages/goal/goal/src/types.ts"

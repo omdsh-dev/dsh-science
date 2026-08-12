@@ -45,7 +45,7 @@ Development advances one phase at a time. Every phase receives a separate local 
 
 ### Applicability and mode
 
-The Host registers one `science` projection unit. Its value is `null` until the first valid `science/mode-bound` event, including for Standard sessions; a missing projection key means the Science package is not composed. `science/mode-bound` is legal only when `session.header.agentPreset === 'science'`, occurs once, and records the fixed mode ID, preset, and a human-maintained mode revision. Per-run `requestHeaderSeq` links the exact logged prompt and safe provider/model identity after that request fact exists.
+The Host registers one `science` projection unit. Its value is `null` until the first valid `science/mode-bound` event, including for Standard sessions; a missing projection key means the Science package is not composed. `science/mode-bound` is legal only when `session.header.agentPreset === 'science'`, occurs once, precedes the first step, request-header, or tool-call fact, and records the fixed mode ID, preset, and a human-maintained mode revision. Every run, chart, or Outcome `requestHeaderSeq` names the latest post-mode header and links its logged prompt plus safe provider/model identity; each record also names one unique, still-pending model tool call after that header. A tool call authorizes exactly one Science fact and cannot be reused after consumption or settlement.
 
 ### Environment
 
@@ -61,11 +61,11 @@ Only `session/end-seed` derives `interrupted`: at each marker the projection rep
 
 ### Chart versions
 
-A chart record contains a stable chart ID, normalized logical name, positive consecutive version, immutable `ImageAttachmentRef`, title and optional caption, successful source run, tool call, request-header seq, environment revision and fingerprint, and creation time. The event envelope supplies the record's sequence. Phase 1 accepts only `image/png` and only a successful run already present in the same folded log. A future diagnostic override for failed runs needs a new decision; the MVP does not infer one.
+A chart record contains a stable chart ID, normalized logical name, positive consecutive version, immutable `ImageAttachmentRef`, title and optional caption, successful source run, tool call, request-header seq, environment revision and fingerprint, and creation time. The event envelope supplies the record's sequence. Phase 1 accepts only `image/png` and only a successful run already present in the same folded log. Version creation times never move backwards. A future diagnostic override for failed runs needs a new decision; the MVP does not infer one.
 
 ### Outcome
 
-An Outcome publication contains a positive consecutive revision, title, bounded Markdown summary, at least one backward run, chart-version, or message-seq reference, publication time, request-header seq, and environment revisions. The request-header reference supplies the exact logged prompt and safe provider/model identity without copying them. Publication implies `published`; a newer revision makes the older event historically superseded without rewriting it. The projection exposes only the latest Outcome.
+An Outcome publication contains a positive consecutive revision, title, bounded Markdown summary, at least one backward run, chart-version, or message-seq reference, publication time, the unique pending `publish_outcome` tool call, request-header seq, and the exact sorted set of applied environment revisions used by its run or chart evidence. That set is empty for message-only evidence. The call anchors the model action; the request-header reference supplies its logged prompt and safe provider/model identity without copying them. Publication implies `published`; a newer revision makes the older event historically superseded without rewriting it. The projection exposes only the latest Outcome.
 
 Evidence references deliberately omit a Session ID. The strict fold and invariant receive the exact owning Session stream and resolve IDs only in that stream. A foreign reference therefore cannot resolve and is rejected before append. This keeps forked seed evidence locally referential without creating runtime pointers back to the parent Session.
 
@@ -82,7 +82,7 @@ Outcome and Goal are independent domains. Outcome operations never read or mutat
 | `science/chart-saved` | One immutable chart version and provenance snapshot | After attachment bytes are durable |
 | `science/outcome-published` | One complete consecutive Outcome publication | After every backward evidence reference validates |
 
-All six events are log-only, required-on-read, lossless JSON, and whole values rather than patches. Their strict decoder rejects unknown fields, unsupported versions, malformed branded strings, non-finite or unsafe numbers, oversized fields, invalid discriminants, and discontinuous transitions. Science event times may equal but never precede the previous Science event time. The Session envelope remains authoritative for event seq and time; domain payloads keep only timestamps or seq values that refer to another fact.
+All six events are log-only, required-on-read, lossless JSON, and whole values rather than patches. Their strict decoder rejects unknown fields, unsupported versions, malformed branded strings, non-finite or unsafe numbers, oversized fields, invalid discriminants, and discontinuous transitions. Science event times may equal but never precede the previous Science event time. A payload timestamp cannot precede any request, tool-call, durable source-run, chart, or message fact it claims as authorization or evidence. The Session envelope remains authoritative for event seq and time; domain payloads keep only timestamps or seq values that refer to another fact.
 
 The pure synchronous strict fold is the authority for invariant checks and fail-loud replay tests. The invariant companion stages that fold on `internal/dispatch` so a violation rejects before `session/event` commits. The projection apply function reuses the strict payload decoders and independently enforces local projection transitions while preserving availability: unrelated or malformed events return the same state reference. Tests require the strict fold and the projection to produce equivalent Science values for every valid live and cold log.
 

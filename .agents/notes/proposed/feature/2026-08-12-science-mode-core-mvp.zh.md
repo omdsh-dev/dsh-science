@@ -45,7 +45,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 
 ### 适用性与 mode
 
-Host 注册一个 `science` projection 单元。在第一条有效 `science/mode-bound` 事件前，其值为 `null`，Standard 会话也如此；缺少 projection key 表示没有组合 Science 包。只有 `session.header.agentPreset === 'science'` 时才能写入 `science/mode-bound`，且只能出现一次；它记录固定 mode ID、preset 与人工维护的 mode revision。逐 run 的 `requestHeaderSeq` 会在相应 request fact 存在后，关联确切的 logged prompt 与安全的提供方／模型 identity。
+Host 注册一个 `science` projection 单元。在第一条有效 `science/mode-bound` 事件前，其值为 `null`，Standard 会话也如此；缺少 projection key 表示没有组合 Science 包。只有 `session.header.agentPreset === 'science'` 时才能写入 `science/mode-bound`，且只能出现一次；它必须早于第一条 step、request-header 或 tool-call fact，并记录固定 mode ID、preset 与人工维护的 mode revision。每个 run、chart 或 Outcome 的 `requestHeaderSeq` 都指向模式绑定后的最新 header，关联其 logged prompt 与安全的提供方／模型 identity；每项记录还必须指向该 header 之后一项唯一且尚未结算的模型 tool call。一个 tool call 只授权一项 Science fact，消费或结算后不得复用。
 
 ### 环境
 
@@ -61,11 +61,11 @@ run start 记录语言、tool call、request-header seq、environment revision �
 
 ### 图表版本
 
-图表 record 包含稳定 chart ID、规范化 logical name、正数连续 version、不可变 `ImageAttachmentRef`、title 与可选 caption、成功的来源 run、tool call、request-header seq、environment revision 与 fingerprint，以及创建时间。事件 envelope 提供该记录的 sequence。Phase 1 只接受 `image/png`，且来源必须是同一 folded log 中已有的成功 run。未来若要允许失败 run 的诊断 override，需要新的决策；MVP 不自行推断。
+图表 record 包含稳定 chart ID、规范化 logical name、正数连续 version、不可变 `ImageAttachmentRef`、title 与可选 caption、成功的来源 run、tool call、request-header seq、environment revision 与 fingerprint，以及创建时间。事件 envelope 提供该记录的 sequence。Phase 1 只接受 `image/png`，且来源必须是同一 folded log 中已有的成功 run；version 创建时间不得倒退。未来若要允许失败 run 的诊断 override，需要新的决策；MVP 不自行推断。
 
 ### Outcome
 
-Outcome publication 包含正数连续 revision、title、有界 Markdown summary、至少一条向后的 run、chart-version 或 message-seq reference、发布时间、request-header seq 与 environment revisions。request-header reference 提供确切的 logged prompt 与安全的提供方／模型 identity，无需重复保存。publication 即表示 `published`；较新的 revision 会使旧事件在历史上变成 superseded，但不重写它。projection 只公开最新 Outcome。
+Outcome publication 包含正数连续 revision、title、有界 Markdown summary、至少一条向后的 run、chart-version 或 message-seq reference、发布时间、唯一且尚未结算的 `publish_outcome` tool call、request-header seq，以及其 run 或 chart 证据实际使用的 applied environment revision 精确升序集合。纯 message 证据使用空集合。该 call 锚定模型操作；request-header reference 提供其 logged prompt 与安全的提供方／模型 identity，无需重复保存。publication 即表示 `published`；较新的 revision 会使旧事件在历史上变成 superseded，但不重写它。projection 只公开最新 Outcome。
 
 证据 reference 有意不包含 Session ID。严格 fold 与 invariant 接收确切的 owning Session stream，只在该 stream 中解析 ID。因此，外来 reference 无法解析，并会在 append 前被拒绝。这样既能让 fork seed evidence 保持本地可引用，也不会建立返回父 Session 的运行时指针。
 
@@ -82,7 +82,7 @@ Outcome 与 Goal 是相互独立的领域。Outcome operation 绝不读取或修
 | `science/chart-saved` | 一个不可变 chart version 与 provenance snapshot | attachment bytes 已持久后 |
 | `science/outcome-published` | 一个完整且连续的 Outcome publication | 所有向后 evidence reference 验证后 |
 
-六种事件都仅写入日志、required-on-read、使用 lossless JSON，并携带 whole value 而非 patch。严格 decoder 会拒绝未知字段、不支持的版本、格式错误的 branded string、非有限或不安全数字、超限字段、非法 discriminant 与不连续 transition。Science event time 可以相等，但绝不能早于上一条 Science event time。Session envelope 继续作为 event seq 与 time 的权威；domain payload 只保留引用其他事实的 timestamp 或 seq 值。
+六种事件都仅写入日志、required-on-read、使用 lossless JSON，并携带 whole value 而非 patch。严格 decoder 会拒绝未知字段、不支持的版本、格式错误的 branded string、非有限或不安全数字、超限字段、非法 discriminant 与不连续 transition。Science event time 可以相等，但绝不能早于上一条 Science event time。payload timestamp 不得早于它声称用于授权或作为证据的 request、tool call、durable source run、chart 或 message fact。Session envelope 继续作为 event seq 与 time 的权威；domain payload 只保留引用其他事实的 timestamp 或 seq 值。
 
 纯同步 strict fold 是 invariant check 与大声失败 replay test 的权威。invariant companion 在 `internal/dispatch` 上暂存该 fold，因此违规会在 `session/event` commit 前拒绝。projection apply function 复用严格 payload decoder，并独立执行本地 projection transition；对 unrelated 或 malformed event 返回同一 state reference 以维持可用性。测试要求 strict fold 与 projection 对每一条有效 live/cold log 产生等价的 Science value。
 

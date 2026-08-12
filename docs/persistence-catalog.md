@@ -550,6 +550,62 @@ Types: [ScheduleChange](subsystems/schedule.md)
 
 Source: [`packages/schedule/schedule/src/types.ts:219`](../packages/schedule/schedule/src/types.ts)
 
+### `science/*`
+
+#### `science/chart-saved` — log-only
+
+```ts persistence-catalog
+/** Records one immutable Science chart attachment version. */
+'science/chart-saved': ScienceChartSavedEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:59`](../packages/science/science-session/src/domain.ts)
+
+#### `science/environment-bound` — log-only
+
+```ts persistence-catalog
+/** Records one validated whole-value Science environment revision. */
+'science/environment-bound': ScienceEnvironmentBoundEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:53`](../packages/science/science-session/src/domain.ts)
+
+#### `science/mode-bound` — log-only
+
+```ts persistence-catalog
+/** Binds this session once to the durable Science mode contract. */
+'science/mode-bound': ScienceModeBoundEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:51`](../packages/science/science-session/src/domain.ts)
+
+#### `science/outcome-published` — log-only
+
+```ts persistence-catalog
+/** Publishes one whole-value Science outcome revision. */
+'science/outcome-published': ScienceOutcomePublishedEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:61`](../packages/science/science-session/src/domain.ts)
+
+#### `science/run-finished` — log-only
+
+```ts persistence-catalog
+/** Records one whole-value Science run terminal state. */
+'science/run-finished': ScienceRunFinishedEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:57`](../packages/science/science-session/src/domain.ts)
+
+#### `science/run-started` — log-only
+
+```ts persistence-catalog
+/** Records one whole-value Science run start. */
+'science/run-started': ScienceRunStartedEvent
+```
+
+Source: [`packages/science/science-session/src/domain.ts:55`](../packages/science/science-session/src/domain.ts)
+
 ### `session/*`
 
 #### `session/end-seed` — log-only
