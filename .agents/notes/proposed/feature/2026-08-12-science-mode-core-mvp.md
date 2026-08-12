@@ -36,7 +36,7 @@ Development advances one phase at a time. Every phase receives a separate local 
 |---|---|
 | `@deepseek-ai/dsh-science-session` | The only durable Science record, event, and projection types; one strict event-stream fold; Session applicability policy; derived projection; and invariant companion |
 | `@deepseek-ai/dsh-science-runtime` | Provider-neutral operational request/result, lease/handle, cancellation, and failure types; it reuses and produces the Session package's durable vocabulary rather than redefining it |
-| `@deepseek-ai/dsh-science-runtime-local` | Conda prefix validation, clean environment, confinement, owned process tree, output limits, and scratch layout |
+| `@deepseek-ai/dsh-science-runtime-local` | Conda prefix observation, exact-Session leases, Science scratch, direct-argv orchestration, and result classification over the shared subprocess and sandbox capabilities |
 | `@deepseek-ai/dsh-tool-science` | Model-visible Science tools that call the domain and runtime services without spawning directly |
 | `@deepseek-ai/dsh-client-ui-science` | Read-only projection consumption and the four Science Details tabs |
 | Built-in Science preset | Per-session prompt and tool composition; Host-plane runtime and projection services remain outside the isolated preset |
@@ -102,7 +102,7 @@ The local provider uses `<DSH_HOME>/science/v1/owners/<session-key>.json` for a 
 
 Each run owns `runs/<run-id>/code.py` or `code.R`, `tmp/`, and `artifacts/`. Its cwd is the run directory, `HOME` is the Session `home/`, `TMPDIR` is the run `tmp/`, and explicit `SCIENCE_STATE_DIR` and `SCIENCE_ARTIFACT_DIR` point to their owned directories. Code is UTF-8 mode `0600`, flushed before spawn, executed by explicit argv with stdin `/dev/null`, and hashed from the exact file bytes. No shell string chooses the executable or code path.
 
-One Session permits one active Python-or-R run. A second request returns `run-busy` before events or directories and never queues silently. Every acquired lease is released in `finally`. Cancellation and disposal terminate only exact owned handles or process groups and await quiescence; neither process cleanup nor Session disposal deletes a Conda prefix or Science scratch.
+One Session permits one active Python-or-R run. A second request returns `RUNTIME_BUSY` before events or directories and never queues silently. Every acquired lease is released in `finally`. Cancellation and disposal act only through exact owned subprocess handles and await quiescence; the subprocess provider retains process-tree and process-group ownership. Neither process cleanup nor Session disposal deletes a Conda prefix or Science scratch.
 
 The provider starts with an empty environment plus an explicit allowlist. It never inherits provider credentials, `SSH_AUTH_SOCK`, user package paths, or ambient `DSH_*`. Default timeout is 120 seconds with a user-configurable maximum of 600 seconds; stdout and stderr each cap at 64,000 bytes; TERM-to-KILL grace is 3 seconds. The model cannot choose interpreter paths, code paths, or timeouts.
 
@@ -122,7 +122,7 @@ The hard guarantees are narrower: no automatic package installation or environme
 |---|---|---|
 | 0 | Freeze this decision and establish isolated local source | Formal Agent Note committed; no product code |
 | 1 | Science Session events, types, strict fold, projection, invariants, and replay tests | Malformed or discontinuous streams fail loudly; live and cold results match; no public mutation service, UI, model, process, Conda, Python, or R work |
-| 2 | Runtime Service Definition and local Conda provider | Fake-prefix CI coverage plus separately reported real-machine acceptance; owned trees settle; environment prefixes remain unchanged |
+| 2 | [Runtime Service Definition and local Conda provider](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | Fake-prefix CI coverage plus separately reported real-machine acceptance; owned trees settle; environment prefixes remain unchanged |
 | 3 | Core compaction prerequisite, Science preset, prompt, state query, and Python/R tools | Science prompt and tools are preset-scoped and every used environment context is durable and model-visible |
 | 4 | PNG save and Outcome publication consumers | Immutable versions and backward evidence validation replay identically |
 | 5 | Generic Details extension and Science client UI | Four accessible tabs render only projection truth; Standard sessions have no entry |

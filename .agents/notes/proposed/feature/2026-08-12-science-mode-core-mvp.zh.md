@@ -36,7 +36,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 |---|---|
 | `@deepseek-ai/dsh-science-session` | 唯一的 durable Science record、event 与 projection 类型；唯一严格事件流 fold；Session applicability policy；派生 projection 与 invariant companion |
 | `@deepseek-ai/dsh-science-runtime` | 提供方无关的 operational request/result、lease/handle、取消与失败类型；它复用并产出 Session package 的 durable vocabulary，不重新定义一套同义模型 |
-| `@deepseek-ai/dsh-science-runtime-local` | Conda prefix 验证、clean environment、约束、owned process tree、输出限制与 scratch 布局 |
+| `@deepseek-ai/dsh-science-runtime-local` | 基于共享 subprocess 与 sandbox capability 的 Conda prefix 观测、精确 Session lease、Science scratch、direct-argv 编排与结果分类 |
 | `@deepseek-ai/dsh-tool-science` | 调用领域与运行时服务而不直接 spawn 的模型可见 Science 工具 |
 | `@deepseek-ai/dsh-client-ui-science` | 只读 projection 消费与四个 Science Details 页签 |
 | 内置 Science preset | 逐会话提示词与工具组合；Host plane 的运行时与 projection 服务位于隔离 preset 之外 |
@@ -102,7 +102,7 @@ Phase 1 不增加 public mutation service。测试通过现有 `Session.append()
 
 每个 run 拥有 `runs/<run-id>/code.py` 或 `code.R`、`tmp/` 与 `artifacts/`。cwd 是 run directory，`HOME` 是 Session `home/`，`TMPDIR` 是 run `tmp/`，显式 `SCIENCE_STATE_DIR` 与 `SCIENCE_ARTIFACT_DIR` 指向各自 owned directory。代码使用 UTF-8 与 mode `0600` 写入，在 spawn 前 flush，通过显式 argv 与 stdin `/dev/null` 执行，并对确切文件 bytes 计算 hash。shell string 不参与选择 executable 或 code path。
 
-一个 Session 只允许一个 active Python-or-R run。第二个请求在 event 或目录产生前返回 `run-busy`，绝不静默排队。每个已取得的 lease 都在 `finally` 中释放。取消与 dispose 只终止 exact owned handle 或 process group，并等待 quiescence；process cleanup 与 Session dispose 都不会删除 Conda prefix 或 Science scratch。
+一个 Session 只允许一个 active Python-or-R run。第二个请求在 event 或目录产生前返回 `RUNTIME_BUSY`，绝不静默排队。每个已取得的 lease 都在 `finally` 中释放。取消与 dispose 只通过精确 owned subprocess handle 执行，并等待 quiescence；process tree 与 process group 的 ownership 仍归 subprocess provider。process cleanup 与 Session dispose 都不会删除 Conda prefix 或 Science scratch。
 
 provider 使用空 environment 加显式 allowlist 启动。它绝不继承 provider credential、`SSH_AUTH_SOCK`、user package path 或 ambient `DSH_*`。默认 timeout 是 120 秒，用户可配置上限为 600 秒；stdout 与 stderr 各自上限为 64,000 bytes；TERM 到 KILL grace 为 3 秒。model 不能选择 interpreter path、code path 或 timeout。
 
@@ -122,7 +122,7 @@ Science MVP 是受信任的本地 code execution，带 file-write confinement，
 |---|---|---|
 | 0 | 冻结本决策并建立隔离本地 source | 正式 Agent Note 已 commit；没有 product code |
 | 1 | Science Session 事件、类型、strict fold、projection、invariant 与 replay test | malformed 或 discontinuous stream loud failure；live/cold 结果相同；不做 public mutation service、UI、model、process、Conda、Python 或 R 工作 |
-| 2 | Runtime Service Definition 与本地 Conda provider | fake-prefix CI coverage 与单独报告的 real-machine acceptance；owned tree 结算；environment prefix 保持不变 |
+| 2 | [Runtime Service Definition 与本地 Conda provider](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | fake-prefix CI coverage 与单独报告的 real-machine acceptance；owned tree 结算；environment prefix 保持不变 |
 | 3 | Core compaction 前置修复、Science preset、prompt、state query 与 Python/R tool | Science prompt/tool 只在 preset scope 内，所有实际使用的 environment context 均 durable 且 model-visible |
 | 4 | PNG save 与 Outcome publication consumer | immutable version 与 backward evidence validation 的 replay 结果相同 |
 | 5 | Generic Details extension 与 Science client UI | 四个 accessible tab 只渲染 projection truth；Standard session 没有入口 |
