@@ -225,6 +225,30 @@ describe('Science projection', () => {
     expect(scienceProjectionSchema.safeParse(state).success).toBe(true)
   })
 
+  it('retains only pre-mode facts that can constrain later Science replay', () => {
+    const unrelated = event('turn/start', 0, 90, { turn: 1 })
+    const empty = emptyScienceProjectionState()
+    expect(applyScienceProjectionState(empty, unrelated)).toBe(empty)
+
+    for (const type of ['step/start', 'request/header', 'tool/call'] as const) {
+      const data = type === 'tool/call'
+        ? { turn: 1, step: 1, callId: CallId('pre-mode-call'), name: 'run_python', arguments: '{}' }
+        : {}
+      const blocked = projectState([event(type, 0, 90, data)])
+      expect(blocked.witness).toHaveLength(1)
+      expect(applyScienceProjectionState(blocked, projectionEvents()[0]!)).toBe(blocked)
+    }
+
+    for (const type of ['user/message', 'assistant/message', 'tool/result'] as const) {
+      const data = type === 'tool/result'
+        ? { turn: 1, step: 1, message: { source: { callId: CallId('pre-mode-result') } } }
+        : {}
+      const retained = projectState([event(type, 0, 90, data)])
+      expect(retained.witness).toHaveLength(1)
+      expect(retained.value).toBeNull()
+    }
+  })
+
   it('returns the identical reference for unrelated, unknown, and malformed events', () => {
     const state = project(projectionEvents())
     expect(state).not.toBeNull()
