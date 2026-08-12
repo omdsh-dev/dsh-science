@@ -20,7 +20,7 @@ import {
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision,
   type StoredPrefix, type StoredSuffix,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionEvent, SurfaceEventType, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SurfaceEventType, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
   type JournalMode, openDatabase, rowToMeta, scanRows, type EventRow, type SessionRow,
 } from './schema.ts'
@@ -194,8 +194,16 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
     return this.coordinator.inspect(id, signal)
   }
 
-  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  readFrom(
+    id: SessionId,
+    fromSeq: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: PersistenceRevision }> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  override drain(session: Session): Promise<PersistenceRevision> {
+    return this.coordinator.drain(session)
   }
 
   // One method serves both public `list` and the backend hook; delegating it to
@@ -226,15 +234,16 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
     signal?.throwIfAborted()
     await this.ready
     signal?.throwIfAborted()
-    const row = this.rowFor(id)
-    if (row === undefined) return undefined
-    const meta = rowToMeta(row)
-    const eventRows = this.db
-      .prepare('SELECT seq, type, time, data, source_event_seqs, surface_op, ignorable FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq')
-      .all(id, fromSeq) as unknown as EventRow[]
+    const snapshot = this.readRows(id, fromSeq)
     signal?.throwIfAborted()
+    if (snapshot === undefined) return undefined
+    const { row, eventRows } = snapshot
     const { preserved } = scanRows(eventRows, fromSeq)
-    return { meta, events: preserved }
+    return {
+      meta: rowToMeta(row),
+      events: preserved,
+      revision: sqliteRevision(this.storeIdentity, row),
+    }
   }
 
   /**
@@ -246,23 +255,7 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
     signal?.throwIfAborted()
     await this.ready
     signal?.throwIfAborted()
-    this.db.exec('BEGIN')
-    let snapshot: { row: SessionRow; eventRows: EventRow[] } | undefined
-    try {
-      const row = this.rowFor(id)
-      if (row !== undefined) {
-        const eventRows = this.db
-          .prepare('SELECT seq, type, time, data, source_event_seqs, surface_op, ignorable FROM events WHERE session_id = ? ORDER BY seq')
-          .all(id) as unknown as EventRow[]
-        snapshot = { row, eventRows }
-      }
-      this.db.exec('COMMIT')
-    } catch (error: unknown) {
-      /* v8 ignore start -- synchronous read failures only need transaction cleanup before propagation. */
-      this.db.exec('ROLLBACK')
-      throw error
-      /* v8 ignore stop */
-    }
+    const snapshot = this.readRows(id)
     signal?.throwIfAborted()
     if (snapshot === undefined) return undefined
     const { row, eventRows } = snapshot
@@ -275,13 +268,46 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
     }
   }
 
+  /** Read metadata and event rows from one SQLite snapshot. */
+  private readRows(
+    id: SessionId,
+    fromSeq?: number,
+  ): { row: SessionRow; eventRows: EventRow[] } | undefined {
+    this.db.exec('BEGIN')
+    try {
+      const row = this.rowFor(id)
+      if (row === undefined) {
+        this.db.exec('COMMIT')
+        return undefined
+      }
+      const eventRows = fromSeq === undefined
+        ? this.db
+          .prepare('SELECT seq, type, time, data, source_event_seqs, surface_op, ignorable FROM events WHERE session_id = ? ORDER BY seq')
+          .all(id) as unknown as EventRow[]
+        : this.db
+          .prepare('SELECT seq, type, time, data, source_event_seqs, surface_op, ignorable FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq')
+          .all(id, fromSeq) as unknown as EventRow[]
+      this.db.exec('COMMIT')
+      return { row, eventRows }
+    } catch (error: unknown) {
+      /* v8 ignore start -- synchronous read failures only need transaction cleanup before propagation. */
+      this.db.exec('ROLLBACK')
+      throw error
+      /* v8 ignore stop */
+    }
+  }
+
   /**
    * Durably append a batch in ONE transaction: materialize the sessions row (if
    * lazy) and INSERT every event, or roll back entirely. The transaction is the
    * atomicity + durability boundary, so a mid-batch failure (a UNIQUE violation
    * on a duplicated seq) leaves the stored log untouched.
    */
-  async appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void> {
+  async appendBatch(
+    meta: SessionHeader,
+    events: readonly SessionEvent[],
+    isMaterialized: boolean,
+  ): Promise<PersistenceRevision> {
     await this.ready
     const insertEvent = this.db.prepare(
       'INSERT INTO events (session_id, seq, type, time, data, source_event_seqs, surface_op, ignorable) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -294,7 +320,11 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
         insertEvent.run(meta.id, event.seq, event.type, event.time, JSON.stringify(event.data), surfaceSeqs, surfaceOp, ignorable)
       }
       this.db.prepare('UPDATE sessions SET revision = revision + 1 WHERE id = ?').run(meta.id)
+      const row = this.rowFor(meta.id)
+      /* v8 ignore next -- the transaction materialized or already owned this row */
+      if (row === undefined) throw new Error(`session "${meta.id}" disappeared during append`)
       this.db.exec('COMMIT')
+      return sqliteRevision(this.storeIdentity, row)
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
@@ -306,7 +336,11 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
    * `tornMarker`) and INSERT the synthetic `closers`. After COMMIT the stored rows
    * == the balanced log.
    */
-  async commitRepair(meta: SessionHeader, tornMarker: number | undefined, closers: readonly SessionEvent[]): Promise<void> {
+  async commitRepair(
+    meta: SessionHeader,
+    tornMarker: number | undefined,
+    closers: readonly SessionEvent[],
+  ): Promise<PersistenceRevision> {
     await this.ready
     this.db.exec('BEGIN')
     try {
@@ -325,7 +359,11 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
       if (tornMarker !== undefined || closers.length > 0) {
         this.db.prepare('UPDATE sessions SET revision = revision + 1 WHERE id = ?').run(meta.id)
       }
+      const row = this.rowFor(meta.id)
+      /* v8 ignore next -- repair only runs for a stored session row */
+      if (row === undefined) throw new Error(`session "${meta.id}" disappeared during repair`)
       this.db.exec('COMMIT')
+      return sqliteRevision(this.storeIdentity, row)
     } catch (error) {
       // The DELETE+INSERT cannot collide (a row at a closer's seq is preserved or
       // deleted as torn first); this rolls back a DB-level failure (disk full,

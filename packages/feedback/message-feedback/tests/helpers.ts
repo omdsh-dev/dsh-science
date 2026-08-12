@@ -145,13 +145,17 @@ class TestPersistence extends SessionPersistence {
   async readFrom(
     id: SessionId,
     fromSeq: number,
-  ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }> {
     this.readFromCalls += 1
     await this.onReadFrom?.()
     const stored = this.durable.get(id)
     return stored === undefined
       ? Promise.reject(new Error(`test persistence: session '${id}' not found`))
-      : { meta: stored.meta, events: stored.events.filter(event => event.seq >= fromSeq) }
+      : {
+        meta: stored.meta,
+        events: stored.events.filter(event => event.seq >= fromSeq),
+        revision: SessionPersistenceRevision(`test:${id}:${stored.events.length}`),
+      }
   }
 
   list(): Promise<SessionHeader[]> {

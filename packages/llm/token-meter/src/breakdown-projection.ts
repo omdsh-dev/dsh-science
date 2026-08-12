@@ -42,6 +42,7 @@ const breakdownSchema = z.object({
 export const contextBreakdownProjectionDefinition:
 ProjectionDefinition<'contextBreakdown', ContextBreakdownState> = {
   key: 'contextBreakdown',
+  definitionToken: Symbol('context breakdown projection definition'),
   schema: breakdownSchema,
   init: () => ({ systemTokens: 0, toolsTokens: 0, messageTokens: 0 }),
   apply: (state, event) => {

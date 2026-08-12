@@ -180,6 +180,7 @@ export class PermissionPresetService extends Service {
   static inject = ['shell', 'approval', 'sessions']
 
   private readonly presets: Record<string, PresetSpec>
+  private readonly projectionDefinitionToken = Symbol('permission projection definition')
   private defaultSettings: () => PermissionSettings
 
   constructor(ctx: Context, config: Config) {
@@ -243,6 +244,7 @@ export class PermissionPresetService extends Service {
     ctx.inject(['sessionProjections'], (projectionCtx) => {
       projectionCtx.sessionProjections.register<'permissions', KnobState>({
         key: 'permissions',
+        definitionToken: this.projectionDefinitionToken,
         schema: selectSchema,
         init: () => EMPTY_KNOBS,
         apply: applyKnobEvent,

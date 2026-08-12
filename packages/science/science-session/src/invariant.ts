@@ -3,13 +3,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import {
-  applyScienceEvent,
-  cloneScienceFoldState,
-  emptyScienceFoldState,
-  isScienceDomainEventType,
-} from './fold.ts'
-import type { ScienceFoldState } from './fold.ts'
+import { assertScienceSessionApplicability } from './applicability.ts'
+import { cloneScienceFoldState, emptyScienceFoldState } from './fold-state.ts'
+import type { ScienceFoldState } from './fold-state.ts'
+import { applyScienceEvent } from './transition.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-science-session'
 
@@ -27,16 +24,7 @@ function applyChecked(
   fail: InvariantFailure,
 ): void {
   try {
-    if (isScienceDomainEventType(event.type) && session.header.agentPreset !== 'science') {
-      throw new Error('Science events require session.header.agentPreset to equal "science"')
-    }
-    if (session.header.agentPreset === 'science'
-      && state.mode === undefined
-      && (event.type === 'step/start'
-        || event.type === 'request/header'
-        || event.type === 'tool/call')) {
-      throw new Error('Science mode must be bound before the first step/start, request/header, or tool/call')
-    }
+    assertScienceSessionApplicability(session.header, state, event)
     applyScienceEvent(state, event)
   } catch (error) {
     /* v8 ignore next -- domain validation throws Error instances */

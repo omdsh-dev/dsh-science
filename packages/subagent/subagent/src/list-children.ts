@@ -4,8 +4,9 @@
  * query service. Candidates come from one live-preferred corpus; each child's
  * mode/label is the registered `subagent` projection unit's value, resolved
  * down a three-rung ladder: the registry's watermark cache for a live child,
- * a durable projection-cache row when it serves an own-suffix identity (the
- * seq gate), and one persistence inspection folded through the registry
+ * a durable projection-cache row bound to the listed persistence revision
+ * when it also serves an own-suffix identity (the seq gate), and one
+ * persistence inspection folded through the registry
  * otherwise, validated against the enumerated lifecycle. The projection fold
  * is the single classification authority — this module parses no descriptor
  * itself. Absent persistence, enumeration is live-only: a cold child is
@@ -18,7 +19,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistence, SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type { SessionProjectionCache } from '@deepseek-ai/dsh-session-projection-cache'
 import { SubagentError } from './error.ts'
@@ -98,7 +99,11 @@ export type SubagentDescendantListEntry = SubagentListEntry & {
   readonly depth: number
 }
 
-type CorpusRecord = { readonly header: SessionHeader; readonly live: Session | undefined }
+type CorpusRecord = {
+  readonly header: SessionHeader
+  readonly live: Session | undefined
+  readonly persisted: SessionPersistenceSnapshot | undefined
+}
 
 interface ListingRuntime {
   readonly projections: SessionProjectionRegistry
@@ -119,9 +124,9 @@ interface PositionedCandidate {
  * live-preferred merge of `ctx.sessions` and optional session persistence,
  * serving each identity from the `subagent` projection unit: the registry's
  * watermark snapshot for a live child; for a cold one, a durable
- * projection-cache row when it serves an own-suffix identity (the seq gate),
- * else one bounded-concurrency persistence inspection folded through the
- * registry.
+ * projection-cache row bound to the listed persistence revision when it also
+ * serves an own-suffix identity (the seq gate), else one bounded-concurrency
+ * persistence inspection folded through the registry.
  * @see SubagentRuntime.listChildren for the public cancellation and failure contract.
  * @param ctx - context carrying the session store, the projection registry,
  *   optional persistence, and the optional projection cache.
@@ -211,10 +216,10 @@ async function prepareListing(
   // cold candidate takes the authoritative preparation rung, so it carries
   // no error code and no configuration check.
   const cache = ctx.get('sessionProjectionCache')
-  let persistedHeaders: readonly SessionHeader[] = []
+  let persistedSnapshots: readonly SessionPersistenceSnapshot[] = []
   if (persistence !== undefined) {
     try {
-      persistedHeaders = await persistence.list(signal)
+      persistedSnapshots = await persistence.listSnapshots(signal)
     } catch (error: unknown) {
       // The backend may reject with its own abort failure after observing the
       // forwarded signal; cancellation stays a stable subagent failure.
@@ -226,9 +231,11 @@ async function prepareListing(
   // Live-preferred merge without header reconciliation: a live record wins
   // its id wholesale, exactly as a live-preferred corpus would serve it.
   const corpus = new Map<SessionId, CorpusRecord>()
-  for (const header of persistedHeaders) corpus.set(header.id, { header, live: undefined })
+  for (const persisted of persistedSnapshots) {
+    corpus.set(persisted.header.id, { header: persisted.header, live: undefined, persisted })
+  }
   for (const session of sessions.list()) {
-    corpus.set(session.header.id, { header: session.header, live: session })
+    corpus.set(session.header.id, { header: session.header, live: session, persisted: undefined })
   }
   const subagentParents = new Set<SessionId>()
   for (const record of corpus.values()) {
@@ -247,11 +254,13 @@ async function resolveCandidateRows(
 ): Promise<(SubagentListEntry | undefined)[]> {
   const { projections, persistence, cache, subagentParents } = listing
   const rows: (SubagentListEntry | undefined)[] = Array.from({ length: candidates.length })
-  const coldReads: { index: number; header: SessionHeader }[] = []
+  const coldReads: { index: number; persisted: SessionPersistenceSnapshot }[] = []
   candidates.forEach((candidate, index) => {
     const childId = candidate.header.id
     if (candidate.live === undefined) {
-      coldReads.push({ index, header: candidate.header })
+      /* v8 ignore next -- cold candidates originate only from listSnapshots() */
+      if (candidate.persisted === undefined) throw new Error(`cold session "${childId}" has no persistence snapshot`)
+      coldReads.push({ index, persisted: candidate.persisted })
       return
     }
     // The registry's watermark cache serves the live value with zero log
@@ -283,8 +292,8 @@ async function resolveCandidateRows(
       async () => {
         for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
           rows[job.index] = await resolveColdIdentity(
-            persistence, projections, cache, job.header,
-            subagentParents.has(job.header.id), signal,
+            persistence, projections, cache, job.persisted,
+            subagentParents.has(job.persisted.header.id), signal,
           )
         }
       },
@@ -337,7 +346,8 @@ function compareCorpusRecords(a: CorpusRecord, b: CorpusRecord): number {
 
 /**
  * Resolve one cold candidate down the remaining ladder: a durable
- * projection-cache row when it serves an own-suffix identity (the seq gate),
+ * projection-cache row when it matches the listed log revision and serves an
+ * own-suffix identity (the seq gate),
  * otherwise one persistence inspection folded through the projection
  * registry (the same detached recipe the API proxy uses for detached session
  * projections). A failed inspection is one transient `unavailable` row
@@ -349,15 +359,16 @@ async function resolveColdIdentity(
   persistence: SessionPersistence,
   projections: SessionProjectionRegistry,
   cache: SessionProjectionCache | undefined,
-  header: SessionHeader,
+  persisted: SessionPersistenceSnapshot,
   hasChildren: boolean,
   signal: AbortSignal | undefined,
 ): Promise<SubagentListEntry> {
+  const header = persisted.header
   const childId = header.id
   if (cache !== undefined) {
     let cached: SubagentIdentityProjection | null | undefined
     try {
-      cached = cache.cachedSnapshot(header)?.values.subagent
+      cached = cache.cachedSnapshot(persisted)?.values.subagent
     } catch {
       // Unlike the preparation fold below, a throwing cache read renders no
       // verdict: the cache is derived data, so its damage (a poisoned stored

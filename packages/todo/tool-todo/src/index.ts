@@ -119,6 +119,8 @@ const todosProjectionSchema: ZodType<TodoItem[] | null> = zod.union([
   zod.null(),
 ])
 
+const todosProjectionDefinitionToken = Symbol('todos projection definition')
+
 /**
  * Register the `todo_write` tool on `ctx.tools` and, when the session-projection seam is composed,
  * the `todos` unit.
@@ -135,6 +137,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     projectionCtx.sessionProjections.register<'todos', TodoItem[] | null>({
       key: 'todos',
+      definitionToken: todosProjectionDefinitionToken,
       schema: todosProjectionSchema,
       init: () => null,
       apply: (state, event) => {

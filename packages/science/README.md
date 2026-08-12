@@ -6,6 +6,8 @@ The Science group owns compact, required-on-read records that identify how a Sci
 
 | Package | Role | ctx key |
 |---|---|---|
-| [`science-session/`](science-session/README.md) | Versioned Science events, strict replay, the `science` projection, and event-stream invariants | — |
+| [`science-session/`](science-session/README.md) | Versioned Science events, the one strict fold authority, a derived `science` projection, and event-stream invariants | — |
+
+The domain fold owns Science transitions; projection code advances that same fold semantics and does not maintain a second provenance state machine. The public package root keeps mutable replay and checkpoint machinery private.
 
 This group contains no interpreter, environment-management, process, tool, or UI implementation. Those responsibilities require separate packages and do not change the Science Session event definitions.

@@ -4,11 +4,11 @@ English | [中文](persistence.zh.md)
 
 The **durability seam** for the event log. [session.md](session.md) describes the in-memory `Session` — the append-only `SessionEvent` log that is the source of truth. This page describes how that log is made durable: the abstract `SessionPersistence` service, its backends, the flush checkpoint, crash recovery, and the metadata header that travels alongside the log. The event vocabulary the log carries is enumerated, member by member, in the generated [persistence log event catalog](../persistence-catalog.md).
 
-The seam is a [capability seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md): one abstract service ([dsh-session-persistence](../../packages/session/session-persistence), `ctx.sessionPersistence`) defining locate/create/append, reusable Session preparation, logical load/inspect, physical suffix reads, and lightweight list/snapshot observation over the existing `SessionEvent` — **no parallel persisted event type** — and two interchangeable backends implementing the same contract. See the [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md).
+The seam is a [capability seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md): one abstract service ([dsh-session-persistence](../../packages/session/session-persistence), `ctx.sessionPersistence`) defining locate/create/append, reusable Session preparation, logical load/inspect, physical suffix reads, exact-lifecycle durability drains, and lightweight list/snapshot observation over the existing `SessionEvent` — **no parallel persisted event type** — and two interchangeable backends implementing the same contract. See the [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md).
 
 ## The flush checkpoint
 
-`session/event` is a *synchronous* notification; persistence plugins copy the event into a per-session controller without blocking the producer. The first pending event starts a fixed batching window, and later events join without resetting its deadline. Expiry starts one durable batch; events admitted during that write receive their own deadline and form a follow-up batch. `session/flush` cancels the wait and drains through quiescence, so the loop still uses it as the ordering and error-observation checkpoint before claiming the next ordinary turn. A rejected background write retains its events and pauses automatic retry; a new event starts a fresh window, while explicit flush retries immediately and reports failure through `agent/error` and the logger, never as a session event past the closed turn. Disposal performs the same final drain. The configured maximum bounds only intentional batching wait, not event-loop scheduling or backend durability latency ([decision](../../.agents/notes/implemented/architecture/2026-08-08-bounded-session-persistence-write-batching.md)).
+`session/event` is a *synchronous* notification; persistence plugins copy the event into a per-session controller without blocking the producer. The first pending event starts a fixed batching window, and later events join without resetting its deadline. Expiry starts one durable batch; events admitted during that write receive their own deadline and form a follow-up batch. `session/flush` cancels the wait and drains through quiescence, so the loop still uses it as the ordering and error-observation checkpoint before claiming the next ordinary turn. A rejected background write retains its events and pauses automatic retry; a new event starts a fresh window, while explicit flush retries immediately and reports failure through `agent/error` and the logger, never as a session event past the closed turn. Disposal performs the same final drain. `SessionPersistence.drain(session)` exposes that barrier to derived-state writers and follows the exact lifecycle's retirement after store detach. The configured maximum bounds only intentional batching wait, not event-loop scheduling or backend durability latency ([decision](../../.agents/notes/implemented/architecture/2026-08-08-bounded-session-persistence-write-batching.md)).
 
 ## Crash recovery preserves an interrupted turn
 
@@ -206,7 +206,7 @@ interface SessionInspection {
 
 ## Lightweight source revisions
 
-Consumers of derived state compare a cheap opaque revision before loading a full event log. The persistence backend owns its representation and changes it transactionally with append or mutating load repair; callers compare it only for equality.
+Consumers of derived state compare a cheap opaque revision before loading a full event log. The persistence backend owns its representation and callers compare it only for equality. Reads return the revision from the same handle or read transaction that supplied their header and events; writes return the revision from the same handle or transaction that committed them. This prevents a path or same-id lifecycle replacement from binding one log's derived state to another log's revision.
 
 ```ts type-equiv
 /**
@@ -220,15 +220,15 @@ type SessionPersistenceRevision = Branded<'SessionPersistenceRevision'>
 /** Lightweight immutable source identity returned without loading a full log. */
 interface SessionPersistenceSnapshot {
   /** Detached metadata for one materialized session. */
-  header: SessionHeader
+  readonly header: SessionHeader
   /** Opaque source-qualified token that changes whenever this stored log changes. */
-  revision: SessionPersistenceRevision
+  readonly revision: SessionPersistenceRevision
 }
 ```
 
 ## The backends
 
-Both implement the same abstract `SessionPersistence` (locate/create/append/prepare/load/inspect/readFrom/list/listSnapshots over `SessionEvent`, with optional cancellation on observation methods) and pass the shared `runPersistenceContract` suite:
+Both implement the same abstract `SessionPersistence` (locate/create/append/prepare/load/inspect/readFrom/drain/list/listSnapshots over `SessionEvent`, with optional cancellation on observation methods) and pass the shared `runPersistenceContract` suite:
 
 - **[dsh-session-persistence-jsonl](../../packages/session/session-persistence-jsonl)** — an append-only logical JSONL log per session, stored as checksummed concatenated Zstandard frames by default or raw lines by configuration, with crash-safe atomic writes, interrupted-turn recovery, and a read/replay path.
 - **[dsh-session-persistence-sqlite](../../packages/session/session-persistence-sqlite)** — `node:sqlite`, one row per `SessionEvent`. The row fields `(session_id, seq, type, time, data, source_event_seqs, surface_op)` map 1:1 onto the event, including optional surface metadata, so there is no parallel persisted schema to keep in sync.
@@ -353,9 +353,23 @@ abstract inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection
  * @param id - the persisted session to read.
  * @param fromSeq - first event seq to include; a non-negative safe integer.
  * @param signal - optional cancellation for queued and backend read work.
- * @returns the header and the stored events with `seq >= fromSeq`.
+ * @returns the header and stored events with `seq >= fromSeq`, plus the
+ * source-qualified revision of that same physical read cut.
  */
-abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }>
+
+/**
+ * Wait until every event admitted for one exact Session lifecycle is durable.
+ * Unlike `ctx.sessions.flush(session)`, this remains valid after the Session
+ * has detached from its store and therefore covers the disposal-retirement
+ * drain. Consumers that persist derived state at detach use this as their
+ * ordering barrier. Implementations that do not track live Session
+ * lifecycles reject instead of claiming durability they cannot establish.
+ * @param session - the live or just-detached lifecycle to drain.
+ * @returns the source-qualified revision observed after that lifecycle's
+ * admitted events are durable.
+ */
+drain(session: Session): Promise<SessionPersistenceRevision>
 
 /**
  * Lightweight listing from metadata, without a full-log parse.
@@ -377,7 +391,7 @@ abstract list(signal?: AbortSignal): Promise<SessionHeader[]>
 abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
 ```
 
-Types: [SessionEvent](session.md) · [SessionId](core.md)
+Types: [Session](session.md) · [SessionEvent](session.md) · [SessionId](core.md)
 
 Source: [`packages/session/session-persistence/src/index.ts:84`](../../packages/session/session-persistence/src/index.ts)
 <!-- END GENERATED cordis-surface -->

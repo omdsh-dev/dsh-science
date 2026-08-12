@@ -88,6 +88,7 @@ function usageOutputTokens(usage: unknown): number | null {
 /** The `sessionStats` unit registered on `ctx.sessionProjections` (exported for the unit spec). */
 export const sessionStatsProjectionDefinition: ProjectionDefinition<'sessionStats', SessionStatsState> = {
   key: 'sessionStats',
+  definitionToken: Symbol('session stats projection definition'),
   schema: sessionStatsSchema,
   init: () => ({
     turns: 0,

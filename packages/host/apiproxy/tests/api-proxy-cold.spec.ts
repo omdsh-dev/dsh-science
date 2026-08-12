@@ -38,6 +38,14 @@ function header(id: string, createdAt: number, extra: Partial<SessionHeader> = {
   return { version: 0, id: sid(id), createdAt, cwd: '/proj', ...extra }
 }
 
+/** Source-qualified lightweight observation for cold-listing fakes. */
+function persisted(meta: SessionHeader) {
+  return {
+    header: meta,
+    revision: SessionPersistenceRevision(`api-proxy-cold:${meta.id}:${String(meta.createdAt)}`),
+  }
+}
+
 describe('sessions.list cold merge', () => {
   it('summarizes unattached sessions: log mtime, locate-less and vanished-log createdAt fallbacks, lineage', async () => {
     const ctx = new Context()
@@ -52,12 +60,13 @@ describe('sessions.list cold merge', () => {
       header('session-b', 2000, { parentSession: sid('session-parent'), origin: 'subagent' }),
       header('session-c', 1500),
     ]
-    // Structural fake of the persistence face list() consumes: list + locate.
+    // Structural fake of the persistence face listSnapshots() consumes.
     // locate: a real per-session file (mtime wins), a backend without one
     // (SQLite shape → createdAt), and a path whose file vanished (stat ENOENT
     // → createdAt).
     ctx.provide('sessionPersistence', {
       list: () => Promise.resolve(metas),
+      listSnapshots: () => Promise.resolve(metas.map(persisted)),
       locate: (meta: SessionHeader) => {
         if (meta.id === sid('session-a')) return { kind: 'jsonl', path: logPath }
         if (meta.id === sid('session-c')) return { kind: 'jsonl', path: join(root, 'vanished.log') }
@@ -140,8 +149,8 @@ describe('cold history recovery view', () => {
       readStoredRevision: id => Promise.resolve(
         id === sessionId ? SessionPersistenceRevision('history-recovery-test:1') : undefined,
       ),
-      appendBatch: () => Promise.resolve(),
-      commitRepair: () => Promise.resolve(),
+      appendBatch: () => Promise.resolve(SessionPersistenceRevision('history-recovery-test:2')),
+      commitRepair: () => Promise.resolve(SessionPersistenceRevision('history-recovery-test:2')),
       list: () => Promise.resolve([structuredClone(meta)]),
     }
     const coordinator = new PersistenceCoordinator(ctx, backend)

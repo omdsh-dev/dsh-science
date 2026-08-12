@@ -17,7 +17,7 @@ import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import { isAppendSurfaceEvent, isJsonValue, lastActivityTime } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistence, SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { SubagentListEntry as CatalogSubagentListEntry } from '@deepseek-ai/dsh-subagent'
@@ -791,18 +791,22 @@ function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock
 /**
  * The projection baseline of one session.list row, fail-soft: attached
  * sessions cut the registry's live watermark cache; cold sessions view the
- * persisted projection cache's identity-checked stored rows (zero log loads
+ * persisted projection cache's revision-checked stored rows (zero log loads
  * either way — the listing use case the cache exists for). The block shape
  * (values + asOfSeq) matches the history tail's, so a client seeds its
  * value store under the same higher-seq-wins rule. Any failure — and an
  * empty value set — yields an absent block: a listing without projections
  * is degraded, never broken.
  */
-function listProjectionsFor(ctx: Context, meta: SessionHeader, session: Session | undefined): SessionProjectionsBlock | undefined {
+function listProjectionsFor(
+  ctx: Context,
+  source: Session | SessionPersistenceSnapshot,
+): SessionProjectionsBlock | undefined {
+  const meta = source.header
   try {
-    const block = session !== undefined
-      ? ctx.get('sessionProjections')?.snapshot(session)
-      : ctx.get('sessionProjectionCache')?.cachedSnapshot(meta)
+    const block = 'revision' in source
+      ? ctx.get('sessionProjectionCache')?.cachedSnapshot(source)
+      : ctx.get('sessionProjections')?.snapshot(source)
     return block !== undefined && Object.keys(block.values).length > 0 ? block : undefined
   } catch (error) {
     ctx.logger.warn(`session.list: projection column for "${meta.id}" failed (serving the row without it): ${String(error)}`)
@@ -1241,9 +1245,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   // exactly for boot-constant units: the value cannot change within a process
   // lifetime, so the fold stays observationally pure, and a stale persisted
   // cache row re-viewing to the current config is the correct outcome.
+  const imageLimitsProjectionDefinitionToken = Symbol('image limits projection definition')
   ctx.inject(['sessionProjections', 'attachments'], (projectionCtx) => {
     projectionCtx.sessionProjections.register<'imageLimits', null>({
       key: 'imageLimits',
+      definitionToken: imageLimitsProjectionDefinitionToken,
       schema: imageLimitsProjectionSchema,
       init: () => null,
       apply: state => state,
@@ -1655,7 +1661,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     signal?.throwIfAborted()
     const items = ctx.sessions.list().map((session) => {
       const agent = ctx.agents.get(session.id)
-      const projections = listProjectionsFor(ctx, session.header, session)
+      const projections = listProjectionsFor(ctx, session)
       return {
         ...summarize(session, agent?.status === 'running'),
         ...projections === undefined ? {} : { projections },
@@ -1665,19 +1671,19 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     const attached = new Set(items.map(item => item.sessionId))
     const persistence = ctx.get('sessionPersistence')
     if (persistence !== undefined) {
-      const cold = (await persistence.list(signal))
-        .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined)
+      const cold = (await persistence.listSnapshots(signal))
+        .filter(snapshot => !attached.has(snapshot.header.id) && snapshot.header.cwd !== undefined)
       signal?.throwIfAborted()
       for (let offset = 0; offset < cold.length; offset += COLD_SUMMARY_BATCH_SIZE) {
         signal?.throwIfAborted()
         const batch = cold.slice(offset, offset + COLD_SUMMARY_BATCH_SIZE)
         const settled = await Promise.allSettled(
-          batch.map(async (meta) => {
+          batch.map(async (persisted) => {
             // Cold rows read the persisted projection cache only — never a
             // log load; a session without a cache row simply has no column.
-            const projections = listProjectionsFor(ctx, meta, undefined)
+            const projections = listProjectionsFor(ctx, persisted)
             return {
-              ...await summarizeCold(persistence, meta, signal),
+              ...await summarizeCold(persistence, persisted.header, signal),
               ...projections === undefined ? {} : { projections },
             }
           }),

@@ -16,7 +16,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 
 把 Science Mode 增加为四个协作层：Science preset 与模型可见工具、提供方无关运行时与本地 Conda 提供方、Science Session 领域，以及现有 Details 栏中的客户端视图。会话日志是唯一持久权威。运行时 handle 与可变 scratch 文件继续属于进程或文件系统状态，绝不成为第二套会话数据库。
 
-开发一次只推进一个阶段。每个阶段都有独立本地提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切 DSH 源码 `b509e331458534eae524c1807fb4a185e4d28834` 播种到一个未配置 remote 的独立本地仓库。它不修改现有 DSH worktree、不创建公开仓库、不触碰 `dsh-external`，也不上传变更。
+开发一次只推进一个阶段。每个阶段都有独立本地提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切的 2026-08-13 DSH 快照 `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` 播种到一个未配置 remote 的独立本地仓库。它不修改现有 DSH worktree、不创建公开仓库、不触碰 `dsh-external`，也不上传变更。
 
 ## 产品决策
 
@@ -34,8 +34,8 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 
 | 包 | 完整 MVP 中的责任 |
 |---|---|
-| `@deepseek-ai/dsh-science-session` | Science 事件、类型、严格回放 fold、projection 与 invariant companion |
-| `@deepseek-ai/dsh-science-runtime` | 提供方无关的环境、binding、run、取消与失败类型 |
+| `@deepseek-ai/dsh-science-session` | 唯一的 durable Science record、event 与 projection 类型；唯一严格事件流 fold；Session applicability policy；派生 projection 与 invariant companion |
+| `@deepseek-ai/dsh-science-runtime` | 提供方无关的 operational request/result、lease/handle、取消与失败类型；它复用并产出 Session package 的 durable vocabulary，不重新定义一套同义模型 |
 | `@deepseek-ai/dsh-science-runtime-local` | Conda prefix 验证、clean environment、约束、owned process tree、输出限制与 scratch 布局 |
 | `@deepseek-ai/dsh-tool-science` | 调用领域与运行时服务而不直接 spawn 的模型可见 Science 工具 |
 | `@deepseek-ai/dsh-client-ui-science` | 只读 projection 消费与四个 Science Details 页签 |
@@ -49,7 +49,7 @@ Host 注册一个 `science` projection 单元。在第一条有效 `science/mode
 
 ### 环境
 
-环境 record 包含正数且连续的 revision、profile identity、configured/validated 时间，以及独立可选的 Python 与 R interpreter binding。每个 binding 都记录 configured/canonical prefix、canonical executable、executable stat identity、语言版本、`conda-meta/history` digest、`bindingFingerprint-v1`，以及 `available`、`unavailable`、`invalid` 或 `drifted` 之一。该 fingerprint 不是 package lock。第一次 run 要求最新环境为 `applied`；第一次 run 后，不得以新的 `applied` revision 替换它。后续验证可以追加 `invalid` 或 `drifted` revision，并阻止新的权威 run。
+环境 record 包含正数且连续的 revision、profile identity、configured/validated 时间，以及独立可选的 Python 与 R interpreter binding。每个 binding 都记录 configured prefix，以及 `available`、`unavailable`、`invalid` 或 `drifted` 之一。`available` binding 还必须记录 canonical prefix、canonical executable、executable stat identity、语言版本、`conda-meta/history` digest 与 `bindingFingerprint-v1`。失败 binding 必须携带 reason，只记录失败前实际观测到的 identity fact，绝不伪造 sentinel value。absolute path 接受 POSIX、Windows drive 与 Windows UNC 语法。该 fingerprint 不是 package lock。第一次 run 要求最新环境为 `applied`；第一次 run 后，不得以新的 `applied` revision 替换它。后续验证可以追加 `invalid` 或 `drifted` revision，并阻止新的权威 run。
 
 ### Run 与恢复
 
@@ -65,7 +65,7 @@ run start 记录语言、tool call、request-header seq、environment revision �
 
 ### Outcome
 
-Outcome publication 包含正数连续 revision、title、有界 Markdown summary、至少一条向后的 run、chart-version 或 message-seq reference、发布时间、唯一且尚未结算的 `publish_outcome` tool call、request-header seq，以及其 run 或 chart 证据实际使用的 applied environment revision 精确升序集合。纯 message 证据使用空集合。该 call 锚定模型操作；request-header reference 提供其 logged prompt 与安全的提供方／模型 identity，无需重复保存。publication 即表示 `published`；较新的 revision 会使旧事件在历史上变成 superseded，但不重写它。projection 只公开最新 Outcome。
+Outcome publication 包含正数连续 revision、title、有界 Markdown summary、至少一条向后的成功 run、chart-version 或 message-seq reference、发布时间、唯一且尚未结算的 `publish_outcome` tool call、request-header seq，以及其 run 或 chart 证据实际使用的 applied environment revision 精确升序集合。纯 message 证据使用空集合。该 call 锚定模型操作；request-header reference 提供其 logged prompt 与安全的提供方／模型 identity，无需重复保存。publication 即表示 `published`；较新的 revision 会使旧事件在历史上变成 superseded，但不重写它。projection 只公开最新 Outcome。
 
 证据 reference 有意不包含 Session ID。严格 fold 与 invariant 接收确切的 owning Session stream，只在该 stream 中解析 ID。因此，外来 reference 无法解析，并会在 append 前被拒绝。这样既能让 fork seed evidence 保持本地可引用，也不会建立返回父 Session 的运行时指针。
 
@@ -82,11 +82,13 @@ Outcome 与 Goal 是相互独立的领域。Outcome operation 绝不读取或修
 | `science/chart-saved` | 一个不可变 chart version 与 provenance snapshot | attachment bytes 已持久后 |
 | `science/outcome-published` | 一个完整且连续的 Outcome publication | 所有向后 evidence reference 验证后 |
 
-六种事件都仅写入日志、required-on-read、使用 lossless JSON，并携带 whole value 而非 patch。严格 decoder 会拒绝未知字段、不支持的版本、格式错误的 branded string、非有限或不安全数字、超限字段、非法 discriminant 与不连续 transition。Science event time 可以相等，但绝不能早于上一条 Science event time。payload timestamp 不得早于它声称用于授权或作为证据的 request、tool call、durable source run、chart 或 message fact。Session envelope 继续作为 event seq 与 time 的权威；domain payload 只保留引用其他事实的 timestamp 或 seq 值。
+六种事件都仅写入日志、required-on-read、使用 lossless JSON，并携带 whole value 而非 patch。严格 decoder 会拒绝未知字段、不支持的版本、格式错误的 branded string、非有限或不安全数字、超限字段与非法 discriminant；fold 则拒绝不连续的 event sequence 与 domain transition。Science event time 可以相等，但绝不能早于上一条 Science event time。payload timestamp 不得早于它声称用于授权或作为证据的 request、tool call、durable source run、chart 或 message fact，也不得晚于所属 event envelope time。Session envelope 继续作为 event seq 与 time 的权威；domain payload 只保留引用其他事实的 timestamp 或 seq 值。
 
-纯同步 strict fold 是 invariant check 与大声失败 replay test 的权威。invariant companion 在 `internal/dispatch` 上暂存该 fold，因此违规会在 `session/event` commit 前拒绝。projection apply function 复用严格 payload decoder，并独立执行本地 projection transition；对 unrelated 或 malformed event 返回同一 state reference 以维持可用性。测试要求 strict fold 与 projection 对每一条有效 live/cold log 产生等价的 Science value。
+纯同步 strict fold 是 Science 事件流 transition 与 provenance 的唯一权威。独立的纯 applicability policy 负责事件流之外的事实：Session header preset 边界，以及 Science preset 的 host activity 前必须绑定 mode。invariant companion 在 `internal/dispatch` 上组合该 policy 与 fold，因此违规会在 `session/event` commit 前拒绝。`replayScience(events)` 假定所属 Session 已经准入该事件流。fail-soft live projection 会推进同一 accumulator 的编码副本；它不维护第二套 reducer，也不重复 provenance rule。每条 committed event 都会推进私有 observed watermark；unrelated 或 malformed event 保持 fold 与 witness 不变，也不发布公开 value change。测试要求 strict replay 与 incremental projection 对每一份已准入的 live/cold log 产生相同的 Science value。
 
-`science` projection registration 从 `stateVersion: 1` 开始。公开值包含 mode、当前 environment、完整 run summary、chart-version metadata、最新 Outcome、只从这些事实派生的 conversation metrics，以及 `lastScienceEventSeq`。私有 checkpoint state 还保留一份稀疏、脱敏的回放见证：event sequence、time 与 type，完整 Science payload，以及 supporting Core event 中严格回放所需的 call identity、tool name、step coordinate 或 evidence identity。request-header body、tool argument 与 message content 都会省略。只有严格回放该见证能派生出完全相同的公开值时，恢复的 checkpoint 才会被提供。binary attachment data、code、stdout、stderr、log 与 Host absolute attachment path 都不进入公开 projection。若私有 state structure 或 fold semantics 变化，则递增 registration version，而不在公开 value 内另放 version 字段。
+`science` projection registration 使用 `stateVersion: 2`。其私有 plain-JSON state 是 `{ observedSeq, fold, witness }`：空日志的 `observedSeq` 为 `-1`，否则指向 unit 已接收的最新 committed Session event；`fold` 是编码后的严格 accumulator；`witness` 是一份稀疏、脱敏的 replay stream，包含 event sequence、time 与 type、完整 Science payload，以及 supporting Core event 中所需的 call identity、tool name、step coordinate 或 evidence identity。request-header body、tool argument 与 message content 都会省略。supporting fact 可以推进私有 state 而不改变公开值；registration 的 `viewChanged` 决策会在这种情况下抑制重复 change notification。
+
+generic projection registry 只会通过 unit 的 `checkpointStateSchema` 接纳不受信任的 cache row。Science checkpoint validator 要求 safe `observedSeq` 不早于最后一条 witness event，再严格回放 witness，并要求它精确复现编码后的 fold，随后才允许恢复该 row。unit 的纯 `checkpointStateSeq` extractor 还要求嵌入 watermark 与 row 外层 `seq` 相等，因此不能把一份有效但较旧的 Science value 拼接到更新的 cache watermark 下。schema 准入只用于持久 checkpoint；extractor 也会校验即将写出的 row，因此持久化两侧都遵守同一条“内嵌水位等于外层 seq”关系。公开 projection schema 校验自身 JSON 字段与派生 metrics，不重新实现历史 provenance transition。公开值包含 mode、当前 environment、完整 run summary、chart-version metadata、最新 Outcome、只从这些事实派生的 conversation metrics，以及 `lastScienceEventSeq`。binary attachment data、code、stdout、stderr、log 与 Host absolute attachment path 都不进入公开值。package root 只公开供消费方使用的 identifier、event type、严格 decoder 与 replay；mutable accumulator、witness、checkpoint 与 transition helper 保持内部可见。若私有 state 字段或 fold semantics 变化，则递增 registration version，而不在公开 value 内另放 version 字段。
 
 ## Phase 1 append 边界
 
@@ -126,7 +128,7 @@ Science MVP 是受信任的本地 code execution，带 file-write confinement，
 | 5 | Generic Details extension 与 Science client UI | 四个 accessible tab 只渲染 projection truth；Standard session 没有入口 |
 | 6 | composition、built-package check 与本地 MVP source closure | 所有命名 source check 通过，fresh review 没有 HIGH 或 BLOCK finding；publish 仍需单独授权 |
 
-Phase 1 只修改 domain package 与注册、记录该 package 所需的 repository metadata。它不会预建 Runtime、Tool、preset、attachment consumer 或 Client package。
+Phase 1 修改 Science domain package，并且只修改安全服务该领域所需的 generic projection/persistence seam：canonical private-checkpoint admission 与 state-to-row watermark、detached JSON value、显式 definition ownership、私有／公开 change 分离、exact-lifecycle durable drain、per-session cache serialization，以及 source-qualified log-revision identity。repository metadata 与架构文档随这些约定同步。它不会预建 Runtime、Tool、preset、attachment consumer 或 Client package，也不执行 UI、Conda、Python、R 或 process-runtime 工作。
 
 ## 考虑过的替代方案
 
@@ -150,6 +152,6 @@ CI fake-prefix evidence 与 real-machine Python/R acceptance 始终分开。未�
 
 ## 风险
 
-主要风险包括：意外重叠现有 `ui-journey` 工作、长 Session 中 projection 膨胀、compaction 丢失 prompt context、`bindingFingerprint-v1` 未捕获 environment drift、process-tree leak、shell 或 ambient-environment 绕过 provenance，以及 user 把 model-published Outcome 当成 scientific certification。local repository isolation、metadata-only projection、Core compaction prerequisite、显式 fingerprint limitation、owned-tree quiescence、clean-env execution 与固定 UI wording 可以在不扩展 Phase 1 的前提下降低这些风险。
+主要风险包括：意外重叠现有 `ui-journey` 工作、长 Session 中 projection 膨胀、compaction 丢失 prompt context、`bindingFingerprint-v1` 未捕获 environment drift、process-tree leak、shell 或 ambient-environment 绕过 provenance，以及 user 把 model-published Outcome 当成 scientific certification。incremental projection 避免每次 live event 都重放此前的完整 witness，但 immutable array copy 与 witness growth 仍会随保留历史增长；这里不主张 constant-time，paging 或 compaction 要等测量结果再决定。local repository isolation、metadata-only projection、Core compaction prerequisite、显式 fingerprint limitation、owned-tree quiescence、clean-env execution 与固定 UI wording 可以在不扩展 Phase 1 的前提下降低这些风险。
 
 pre-release event policy 使每种 Science event 都 required-on-read。旧 build 会拒绝包含这些 event 的 Session。除非另行设计 compatibility 或 migration promise，否则这种拒绝是有意行为。

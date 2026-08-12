@@ -1,7 +1,8 @@
 import { MessageId, createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
+import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, rename, stat, symlink } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -18,17 +19,52 @@ const statRace = vi.hoisted(() => ({
   reads: 0,
 }))
 
+const openRace = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  afterRead: undefined as (() => Promise<void>) | undefined,
+  afterStat: undefined as (() => Promise<void>) | undefined,
+  fired: false,
+  statFired: false,
+}))
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
-    stat: (async (...args: Parameters<typeof actual.stat>) => {
-      const identity = await actual.stat(...args)
-      if (String(args[0]) !== statRace.path || !('mtimeNs' in identity)) return identity
-      statRace.reads += 1
-      if (statRace.reads !== 2) return identity
-      return { ...identity, mtimeNs: identity.mtimeNs + 1n }
-    }) as typeof actual.stat,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args)
+      const path = String(args[0])
+      if (path !== statRace.path && path !== openRace.path) return handle
+      return new Proxy<FileHandle>(handle, {
+        get(target, property) {
+          if (property === 'stat' && (path === statRace.path || path === openRace.path)) {
+            return async (...statArgs: Parameters<FileHandle['stat']>) => {
+              const identity = await target.stat(...statArgs)
+              if (path === openRace.path && !openRace.statFired && openRace.afterStat !== undefined) {
+                openRace.statFired = true
+                await openRace.afterStat()
+              }
+              if (path !== statRace.path || !('mtimeNs' in identity)) return identity
+              statRace.reads += 1
+              return statRace.reads === 2
+                ? { ...identity, mtimeNs: identity.mtimeNs + 1n }
+                : identity
+            }
+          }
+          if (property === 'read' && path === openRace.path) {
+            return async (...readArgs: Parameters<FileHandle['read']>) => {
+              const result = await target.read(...readArgs)
+              if (!openRace.fired && openRace.afterRead !== undefined) {
+                openRace.fired = true
+                await openRace.afterRead()
+              }
+              return result
+            }
+          }
+          return target[property as keyof FileHandle]
+        },
+      })
+    },
   }
 })
 
@@ -86,6 +122,11 @@ function rawLogPath(root: string, cwd: string | undefined, id: SessionId): strin
 afterEach(async () => {
   statRace.path = undefined
   statRace.reads = 0
+  openRace.path = undefined
+  openRace.afterRead = undefined
+  openRace.afterStat = undefined
+  openRace.fired = false
+  openRace.statFired = false
   vi.restoreAllMocks()
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
@@ -453,30 +494,72 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await ctx.sessionPersistence.create(m)
     await ctx.sessionPersistence.append(m.id, oneTurnLog())
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
+      readFirstLine(path: string, signal?: AbortSignal): Promise<{
+        line: string
+        revision: string
+      } | undefined>
     }
-    const listArtifacts = persistence.listArtifacts.bind(persistence)
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementation(async () => {
-      const artifacts = await listArtifacts()
-      await rm(artifacts[0]!.path)
-      return artifacts
+    const readFirstLine = persistence.readFirstLine.bind(persistence)
+    const discovery = vi.spyOn(persistence, 'readFirstLine').mockImplementation(async (path, signal) => {
+      await rm(path)
+      return readFirstLine(path, signal)
     })
 
     await expect(ctx.sessionPersistence.listSnapshots()).resolves.toEqual([])
     discovery.mockRestore()
   })
 
-  it('surfaces non-ENOENT snapshot stat failures after discovery', async () => {
+  it('surfaces non-ENOENT snapshot observation failures after discovery', async () => {
+    const m = meta('snapshot-observation-failure')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
+      readFirstLine(path: string, signal?: AbortSignal): Promise<{
+        line: string
+        revision: string
+      } | undefined>
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: meta('snapshot-stat-failure'),
-      path: `${root}\0snapshot-stat-failure`,
-    }])
+    const failure = Object.assign(new Error('snapshot handle stat failed'), { code: 'EIO' })
+    const discovery = vi.spyOn(persistence, 'readFirstLine').mockRejectedValue(failure)
 
-    await expect(ctx.sessionPersistence.listSnapshots()).rejects.toThrow(/null bytes/)
+    await expect(ctx.sessionPersistence.listSnapshots()).rejects.toBe(failure)
     discovery.mockRestore()
+  })
+
+  it('never pairs an old listed header with a replacement path revision', async () => {
+    const m = meta('snapshot-path-replacement', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const path = rawLogPath(root, m.cwd, m.id)
+    const oldPath = `${path}.old`
+    const replacement = { ...m, createdAt: m.createdAt + 1 }
+    openRace.path = path
+    openRace.afterRead = async () => {
+      await rename(path, oldPath)
+      await writeFile(path, [
+        JSON.stringify(toHeaderLine(replacement)),
+        ...oneTurnLog().map(event => JSON.stringify(event)),
+        '',
+      ].join('\n'))
+    }
+
+    const [observed] = await ctx.sessionPersistence.listSnapshots()
+    const currentRevision = await (ctx.sessionPersistence as JsonlSessionPersistence)
+      .readStoredRevision(m.id)
+
+    expect(openRace.fired).toBe(true)
+    if (observed?.header.createdAt === m.createdAt) {
+      expect(observed.revision).not.toBe(currentRevision)
+    } else {
+      expect(observed?.header.createdAt).toBe(replacement.createdAt)
+      expect(observed?.revision).toBe(currentRevision)
+    }
+    await expect(ctx.sessionPersistence.listSnapshots()).resolves.toEqual([
+      expect.objectContaining({
+        header: { ...replacement, delegationDepth: 0 },
+        revision: currentRevision,
+      }),
+    ])
   })
 
   it('forwards snapshot-list cancellation and awaits in-flight discovery cleanup', async () => {
@@ -509,24 +592,16 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await expect(pending).rejects.toBe(reason)
   })
 
-  it('checks cancellation after an uncancellable snapshot stat settles', async () => {
+  it('checks cancellation after an uncancellable same-handle snapshot stat settles', async () => {
     const m = meta('snapshot-stat-cancellation')
     await ctx.sessionPersistence.create(m)
     await ctx.sessionPersistence.append(m.id, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: m,
-      path: rawLogPath(root, m.cwd, m.id),
-    }])
     const reason = new Error('JSONL snapshot stat cancelled')
     const controller = new AbortController()
-    const pending = ctx.sessionPersistence.listSnapshots(controller.signal)
-    queueMicrotask(() => { controller.abort(reason) })
+    openRace.path = rawLogPath(root, m.cwd, m.id)
+    openRace.afterStat = async () => { controller.abort(reason) }
 
-    await expect(pending).rejects.toBe(reason)
-    expect(discovery).toHaveBeenCalledWith(controller.signal)
+    await expect(ctx.sessionPersistence.listSnapshots(controller.signal)).rejects.toBe(reason)
   })
 
   it('rejects a stored v0 log containing a legacy request/header-delta event', async () => {
@@ -689,7 +764,7 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
       return realSync.call(this)
     })
     const backend = ctx.sessionPersistence as unknown as {
-      rollbackAppend: (path: string, size: number) => Promise<void>
+      rollbackAppend: (handle: FileHandle, size: number) => Promise<void>
     }
     const realRollback = backend.rollbackAppend.bind(backend)
     backend.rollbackAppend = () => Promise.reject(new Error('simulated rollback failure'))

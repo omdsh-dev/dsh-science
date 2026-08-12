@@ -95,6 +95,8 @@ turn/end
 
 **模型可见即已记录。** 抵达模型请求的一切都必须能从日志重建，并由一项运行时不变量断言这一点。因此，新增一项模型可见输入就需要新增一个会话事件：扩展 `SessionEventMap` 并从日志渲染。
 
+持久领域读取模型遵守同一条权威边界。领域拥有唯一的权威事件折叠，并从该折叠派生公开投影；通用的 [session-projection 注册表](../packages/session/session-projection/README.md)拥有 live 驱动、水位线、缓存准入与通知。领域可以提供 checkpoint 状态 schema 以拒绝 schema-invalid 的私有缓存行，为 provenance 较重的状态提供内嵌水位 extractor 以绑定外层缓存行 seq，也可以在回放证据推进而公开值不变时提供公开 view 变化断言。持久投影写入会等待该精确 Session lifecycle 的日志持久排空，并按 session id 串行化。缓存状态永远只是可丢弃的捷径，不是第二份事实来源。带有完整 provenance 严格折叠的示例见 [Science Session 领域](subsystems/science.md)。
+
 ## 能力 seam
 
 一个 **seam** 是一项可替换能力，包含三种角色：声明接口的 **Service Definition**、实现它的 **Service provider**，以及使用它的 **Consumer**（通常是面向模型的工具）。一个包可以合并承担多个角色，但单一角色本身不是 seam；添加一项能力意味着把三者一并设计（[能力图](capability-seams.md)）。
@@ -120,7 +122,7 @@ seam 正是替换一个提供方就能改变整个产品的原因。文件系统
 | 添加模型可见上下文 | 调用 `agent.inject()`；它会落到下一次获准的请求中 |
 | 添加 UI 或编辑器集成 | 驱动 `ctx.agents` 并从 `session/event` 渲染 |
 | 添加 Web Client Chat 节点 | 注册 `ConversationNodeDefinition` + keyed renderer |
-| 添加持久会话状态 | 扩展 `SessionEventMap`；从日志渲染和回放 |
+| 添加持久会话状态 | 扩展 `SessionEventMap`；拥有唯一严格折叠，并在客户端需要时把派生读取模型注册到 `ctx.sessionProjections` |
 | 生成会话标题 | 注册唯一的 `ctx.sessionTitle` 提供方 |
 | 管理同会话目标 | 使用 `ctx.goals`；通过 `agent/*` 续跑 |
 | fork 活跃会话 | `ctx.sessions.fork(source, boundary?, childSessionId?)` |

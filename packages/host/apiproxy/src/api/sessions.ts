@@ -195,9 +195,9 @@ export interface SessionSummary {
   /**
    * Projection baseline for this row, with zero log loads: attached sessions
    * read the registry's live watermark cut; cold sessions read the persisted
-   * projection cache's stored rows — as stale as that session's last durable
-   * checkpoint (`asOfSeq` says exactly how stale), never wrong, and directly
-   * seedable into the client's per-session value store under its
+   * projection cache's lifecycle-bound stored rows — as stale as that
+   * session's last durable checkpoint (`asOfSeq` says exactly how stale),
+   * schema-admitted, and directly seedable into the client's per-session value store under its
    * higher-seq-wins rule (a list baseline can never overwrite a newer push
    * frame). Absent when no value is available (no registry, no cache row for
    * a cold session, or a fail-soft cache read miss); a listing client treats

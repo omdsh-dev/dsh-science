@@ -151,9 +151,17 @@ class TestPersistence extends SessionPersistence {
     return structuredClone(entry)
   }
 
-  async readFrom(id: SessionIdType, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async readFrom(id: SessionIdType, fromSeq: number, signal?: AbortSignal): Promise<{
+    meta: SessionHeader
+    events: SessionEvent[]
+    revision: SessionPersistenceRevision
+  }> {
     const whole = await this.inspect(id, signal)
-    return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
+    return {
+      meta: whole.meta,
+      events: whole.events.filter(event => event.seq >= fromSeq),
+      revision: SessionPersistenceRevision(`test:${TestPersistence.revisions.get(id)}`),
+    }
   }
 
   async list(): Promise<SessionHeader[]> {

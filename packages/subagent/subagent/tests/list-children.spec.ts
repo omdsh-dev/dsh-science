@@ -132,6 +132,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
  */
 const hostileProjectionDefinition: ProjectionDefinition<'subagentListHostileProbe', { poisoned?: boolean }> = {
   key: 'subagentListHostileProbe',
+  definitionToken: Symbol('test hostile subagent projection definition'),
   schema: z.null(),
   init: () => ({}),
   apply: (state, event) =>
@@ -633,7 +634,7 @@ describe('SubagentRuntime.listChildren', () => {
   it('fails the whole enumeration when the persisted listing itself fails', async () => {
     const { ctx, parent } = await setup([textResponse('done')])
     await startChild(ctx, parent, 'never listed')
-    ctx.sessionPersistence.list = () => Promise.reject(new Error('backend listing failed'))
+    ctx.sessionPersistence.listSnapshots = () => Promise.reject(new Error('backend listing failed'))
     // Without any abort in flight, the original backend failure propagates
     // as the operation failure — no cancellation mapping, no diagnostic rows.
     await expect(ctx.subagents.listChildren(parent.id)).rejects.toThrow('backend listing failed')
@@ -768,9 +769,10 @@ describe('SubagentRuntime.listChildren', () => {
     const childId = await startChild(ctx, parent, 'cached child')
     // The child's turn/end and disposal are the cache's mandatory checkpoint
     // points; both writes are fail-soft asynchronous, so wait for the row.
-    const header = (await ctx.sessionPersistence.list()).find(meta => meta.id === childId)
+    const persisted = (await ctx.sessionPersistence.listSnapshots())
+      .find(snapshot => snapshot.header.id === childId)
     await vi.waitFor(() => {
-      expect(ctx.sessionProjectionCache.cachedSnapshot(header!)?.values.subagent).toBeDefined()
+      expect(ctx.sessionProjectionCache.cachedSnapshot(persisted!)?.values.subagent).toBeDefined()
     }, { timeout: 5_000 })
     const inspect = vi.spyOn(ctx.sessionPersistence, 'inspect')
     await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
@@ -872,7 +874,7 @@ describe('SubagentRuntime.listChildren', () => {
     const { ctx, parent } = await setup([])
     const controller = new AbortController()
     controller.abort()
-    ctx.sessionPersistence.list = () => Promise.reject(new Error('must not be called'))
+    ctx.sessionPersistence.listSnapshots = () => Promise.reject(new Error('must not be called'))
     await expect(ctx.subagents.listChildren(parent.id, controller.signal)).rejects.toThrow(
       expect.objectContaining({ code: 'CANCELLED' }) as Error,
     )
@@ -882,7 +884,7 @@ describe('SubagentRuntime.listChildren', () => {
     const { ctx, parent } = await setup([])
     const controller = new AbortController()
     const entered = Promise.withResolvers<undefined>()
-    ctx.sessionPersistence.list = (signal) => {
+    ctx.sessionPersistence.listSnapshots = (signal) => {
       entered.resolve(undefined)
       return new Promise((_resolve, reject) => {
         signal?.addEventListener('abort', () => {

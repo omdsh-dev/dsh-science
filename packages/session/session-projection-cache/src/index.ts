@@ -3,9 +3,10 @@
  * checkpoints of every registered projection unit's state, one record per
  * session on the domain data form (`session_projcache` domain — the shipped
  * json backend lands it beside `workspace.json`). The cache is a fold
- * shortcut, never an authority: a row is possibly stale (its `seq`
- * says how stale) but never wrong, so every write path is fail-soft (a lost
- * write costs a longer tail replay on the next cold read) and a
+ * shortcut, never an authority: a row may be stale (its `seq` says how
+ * stale), version-incompatible, or rejected by its unit's checkpoint-state
+ * schema, so every automatic write path is fail-soft (a lost write becomes a
+ * cache miss and full replay once the durable log revision changes) and a
  * `ver` mismatch discards the row instead of migrating it. Design
  * authority: the session-projection RFC
  * (.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md).
@@ -15,17 +16,18 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-// Empty type import: applies the package's cordis Context merge
-// (`ctx.sessionPersistence`), which this service reads on the cold path.
-import type {} from '@deepseek-ai/dsh-session-persistence'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type {
+  SessionPersistenceRevision,
+  SessionPersistenceSnapshot,
+} from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionCheckpoint, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import { projectionCacheDomainSpec } from './spec.ts'
-import type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
+import type { CheckpointRecord } from './spec.ts'
 
-export { checkpointIdentity, checkpointRecord, checkpointRow, projectionCacheDomainSpec } from './spec.ts'
-export type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
+export { checkpointRecord, checkpointRevision, checkpointRow, projectionCacheDomainSpec } from './spec.ts'
+export type { CheckpointRecord } from './spec.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -51,12 +53,14 @@ export const Config: z<Config> = z.object({
   writeIntervalMs: z.natural().min(1).required(),
 })
 
-/** Per-session write-behind bookkeeping (live sessions only; dropped at retire). */
+/** Per-session write-behind bookkeeping, retained through detached retries. */
 interface DirtyState {
-  /** Committed events since the last durable write. */
+  /** Committed events not yet covered by a successful cache write. */
   pending: number
-  /** Interval trigger armed at the first dirty event after a clean write. */
+  /** Interval trigger armed while this state remains dirty. */
   timer: ReturnType<typeof setTimeout> | undefined
+  /** Whether the exact Session has detached and must retain retry ownership. */
+  detached: boolean
 }
 
 /**
@@ -65,8 +69,10 @@ interface DirtyState {
  * (count/interval triggers from {@link Config}) plus two mandatory points —
  * `turn/end` and session disposal (the live-to-cold moment) — and serves the
  * cold-read ladder: cached row, persistence `readFrom` tail, registry
- * `restore`, durable write-back. Every durable write is fail-soft: failures
- * log a warning and the cache self-heals on the next write or cold read.
+ * `restore`, durable write-back. Automatic writes are fail-soft: failures log
+ * a warning; a live dirty session retries on its interval or next mandatory
+ * point, while a failed detach retains its exact lifecycle for interval and
+ * cold-read retries.
  */
 export class SessionProjectionCache extends Service {
   static inject = ['storageDomain', 'sessionProjections', 'sessionPersistence', 'sessions']
@@ -75,6 +81,10 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  /** Exact detached lifecycles whose log/cache write still needs proof. */
+  private readonly detached = new Map<SessionId, Set<Session>>()
+  /** Per-id tails serialize every cache operation across lifecycle replacement. */
+  private readonly operations = new Map<SessionId, Promise<unknown>>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
@@ -83,201 +93,335 @@ export class SessionProjectionCache extends Service {
   /** Open the domain and install the write-behind listeners. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
-    this.installWritePath()
+    const stopWritePath = this.installWritePath()
+    // One disposer makes teardown ordering explicit: close admission and
+    // timers, drain admitted operations, then close their storage domain.
+    this.ctx.effect(() => async () => {
+      stopWritePath()
+      for (const state of this.dirty.values()) {
+        if (state.timer !== undefined) {
+          clearTimeout(state.timer)
+          state.timer = undefined
+        }
+      }
+      // Retry detached lifecycle heads before discarding timers. Success lets
+      // queued successors advance; failure ends that id's fail-soft shutdown
+      // pass without waiting forever on its pending persistence predecessor.
+      for (const sessions of this.detached.values()) {
+        for (const session of [...sessions]) {
+          if (this.detached.get(session.id)?.values().next().value !== session) break
+          await this.flushSoft(session, 'teardown')
+        }
+      }
+      for (const state of this.dirty.values()) {
+        if (state.timer !== undefined) clearTimeout(state.timer)
+      }
+      this.dirty.clear()
+      this.detached.clear()
+      await Promise.allSettled([...this.operations.values()])
+      await domain.close()
+    }, 'sessionProjectionCache.lifecycle')
   }
 
   /**
-   * The stored record for one session, accepted only when its bound log
-   * identity matches `expected`. A session id names a slot, not a lifecycle:
-   * a recreated id or a persistence store swapped under a surviving cache
-   * must not let an old record seed state folded from an unrelated log.
+   * The stored record for one session, accepted only when its source-qualified
+   * log revision exactly matches `expected`.
    * Synchronous from the domain's in-memory state.
    * @param id - the session whose record is read.
-   * @param expected - the log identity the caller holds (live or stored header).
-   * @returns the identity-matching record, or `undefined` (absent or unrelated).
+   * @param expected - the persistence revision observed by the caller.
+   * @returns the revision-matching record, or `undefined` (absent or unrelated).
    */
-  private recordFor(id: SessionId, expected: CheckpointIdentity): CheckpointRecord | undefined {
+  private recordFor(id: SessionId, expected: SessionPersistenceRevision): CheckpointRecord | undefined {
     const record = this.requireTable().get(id)
     if (record === undefined) return undefined
-    return identityMatches(record.identity, expected) ? record : undefined
+    return record.revision === expected ? record : undefined
   }
 
   /**
    * The zero-I/O listing read: whole values viewed straight from the stored
-   * rows (version-matching keys only), each cut carried with its watermark
-   * so a client value store can seed under its higher-seq-wins rule — as
-   * stale as the last durable checkpoint but never wrong, and never from an
-   * unrelated log (the caller's header is the identity witness). Fresher
+   * rows (version- and checkpoint-schema-matching keys only). Every served
+   * row must share one watermark so a client value store can seed the exact
+   * cut under its higher-seq-wins rule — as stale as the last durable
+   * checkpoint but never from an unrelated source or log revision (the
+   * caller's persistence snapshot is the witness). Fresher
    * paths (the history tail baseline, {@link coldSnapshot}) supersede these
    * values whenever a session is actually opened.
-   * @param meta - the listed session's header (identity witness; no log read).
-   * @returns the cut (`asOfSeq` = lowest served-row watermark), or
-   *   `undefined` when no usable row exists for this lifecycle.
+   * @param persisted - the listed session header and revision (no log read).
+   * @returns the exact cut, or `undefined` when no usable row exists for this
+   *   lifecycle or its admitted rows do not share one watermark.
    */
-  cachedSnapshot(meta: SessionHeader): ProjectionSnapshot | undefined {
-    const record = this.recordFor(meta.id, identityOf(meta))
+  cachedSnapshot(persisted: SessionPersistenceSnapshot): ProjectionSnapshot | undefined {
+    if (this.detached.has(persisted.header.id)) return undefined
+    const record = this.recordFor(persisted.header.id, persisted.revision)
     if (record === undefined) return undefined
     const values = this.ctx.sessionProjections.viewCheckpoint(record.rows)
     const keys = Object.keys(values)
     if (keys.length === 0) return undefined
-    // The block carries ONE cut: the lowest served watermark is the seq every
-    // value is at least current as of (under-claiming is safe under
-    // higher-seq-wins; over-claiming would let a stale value outrank pushes).
-    const asOfSeq = Math.min(...keys.map(key => (record.rows[key] as { seq: number }).seq))
+    const watermarks = keys.map(key => (record.rows[key] as { seq: number }).seq)
+    const asOfSeq = watermarks[0]
+    /* v8 ignore next -- keys.length above proves one admitted row */
+    if (asOfSeq === undefined) return undefined
+    if (watermarks.some(seq => seq !== asOfSeq)) return undefined
     return { asOfSeq, values }
   }
 
   /**
-   * Durably checkpoint one live session NOW (both mandatory points call
-   * this; tests and carriers may too). The registry cut is snapshotted at
-   * this boundary (states are live references), then the whole record is
-   * replaced. NOT fail-soft — callers on the fail-soft paths contain it.
+   * Durably checkpoint one live or retiring session (both mandatory points
+   * call this; tests and carriers may too). Transactions for one session id
+   * are serialized. Each transaction snapshots the registry only after its
+   * predecessor settles, waits for the exact Session lifecycle's log drain,
+   * then replaces the whole record. NOT fail-soft — callers on the fail-soft
+   * paths contain it.
    * @param session - the live session to checkpoint.
-   * @returns resolution after durability and event emission.
+   * @returns resolution after log durability and cache replacement.
    */
-  async write(session: Session): Promise<void> {
-    const rows = this.ctx.sessionProjections.checkpoint(session)
-    this.markClean(session)
-    // Durability barrier: the checkpoint cut was taken above, so flushing
-    // AFTER it guarantees every event inside the cut is durably logged
-    // before the cache row lands — a crash can leave the cache behind the
-    // log (longer tail replay) but never ahead of it (phantom values folded
-    // from events no stored log contains). At detach the store entry is
-    // already gone; persistence's own retirement drain covers that path and
-    // any residual overreach is caught by the cold read's anchored floor.
-    if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
-    await this.put(session.id, identityOf(session.header), rows)
+  write(session: Session): Promise<void> {
+    return this.serialize(session.id, () => this.writeNow(session))
+  }
+
+  /** Execute one serialized checkpoint transaction for an exact Session lifecycle. */
+  private async writeNow(session: Session): Promise<void> {
+    let includedDirtyEvents = 0
+    try {
+      const rows = this.ctx.sessionProjections.checkpoint(session)
+      includedDirtyEvents = this.beginWrite(session)
+      // The exact-lifecycle barrier remains valid after SessionStore detach.
+      // The log may advance beyond this cut while the barrier runs, which only
+      // leaves the cache safely behind it.
+      const revision = await this.ctx.sessionPersistence.drain(session)
+      await this.put(session.id, revision, rows)
+      this.markClean(session, includedDirtyEvents)
+    } catch (error: unknown) {
+      this.armTimer(session)
+      throw error
+    }
   }
 
   /**
-   * Cold-read one persisted session's projections with zero full-log load:
-   * cached rows + a persistence `readFrom` tail from the registry's restore
-   * floor, refolded by the registry and written back (fail-soft) so the next
-   * cold read starts closer. A cache row invalidated by a shrunk log
-   * (crash-repair truncation) triggers one full re-read from seq 0 — the
+   * Cold-read one persisted session's projections: cached rows plus a
+   * persistence `readFrom` tail from the registry's restore floor, refolded
+   * by the registry and written back (fail-soft). The rows seed that fold only
+   * when their source-qualified revision equals the tail read's revision. A
+   * revision mismatch, shrunk log, or unit-owned state rejection triggers one
+   * full re-read from seq 0 — the
    * ladder's slow rung, still no crash. Rejects when the session has no
    * persisted log (`not found` from the persistence seam).
    * @param id - the persisted session to read.
    * @param signal - optional cancellation for the persistence reads.
-   * @returns the snapshot cut at the stored log end.
+   * @returns the snapshot cut at the stored log end, serialized with cache writes for this id.
    */
-  async coldSnapshot(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnapshot> {
+  coldSnapshot(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnapshot> {
+    return this.serialize(id, () => this.coldSnapshotNow(id, signal))
+  }
+
+  /** Run one cold-read ladder inside the id's cache-operation serialization. */
+  private async coldSnapshotNow(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnapshot> {
+    const detached = [...(this.detached.get(id) ?? [])]
     const record = this.requireTable().get(id)
     const cached = record?.rows ?? {}
     const floor = this.ctx.sessionProjections.restoreFloor(cached)
     const persistence = this.ctx.sessionPersistence
+    // A failed automatic retirement can leave the durable log behind the
+    // detached Session. Prove every retained lifecycle durable before a cold
+    // read is allowed to observe the id.
+    for (const session of detached) await persistence.drain(session)
     if (floor === undefined) {
       // No unit registered: nothing to fold, but the not-found contract must
       // hold in this topology too — the probe read rejects for an absent log
       // and dates the empty cut for a present one.
       const probe = await persistence.readFrom(id, 0, signal)
+      for (const session of detached) this.dropDirty(session)
       return { asOfSeq: probe.events.at(-1)?.seq ?? -1, values: {} }
     }
     let restored: { snapshot: ProjectionSnapshot; checkpoint: ProjectionCheckpoint }
     const tail = await persistence.readFrom(id, floor, signal)
-    // The tail's stored header is the identity witness: a record bound to a
-    // different lifecycle (recreated id, swapped store) is discarded whole
-    // before any of its rows can seed a fold.
-    const related = record === undefined || identityMatches(record.identity, identityOf(tail.meta))
+    let restoredRevision = tail.revision
+    // An opaque revision proves equality, not ancestry. A changed revision
+    // therefore invalidates the cached prefix and requires an authoritative
+    // read from seq 0 before any row can seed a fold.
+    const related = record === undefined || record.revision === tail.revision
     try {
       if (!related) throw new Error('unrelated log identity')
       restored = this.ctx.sessionProjections.restore(cached, tail.events, floor)
     } catch {
-      // The recoverable restore failures: an unrelated record, or a row
-      // overreaching the stored log end (or predating the floor). Both imply
-      // floor > 0 (baseSeq-0 restores never throw and an unrelated record
-      // still carried a usable watermark), so the full log is a fresh read.
+      // Recoverable restore failures include an unrelated record, an invalid
+      // private row, and a row overreaching the stored log end (or predating
+      // the floor). The full log is a fresh authoritative read.
       const whole = await persistence.readFrom(id, 0, signal)
       restored = this.ctx.sessionProjections.restore({}, whole.events, 0)
+      restoredRevision = whole.revision
     }
-    await this.putSoft(id, identityOf(tail.meta), restored.checkpoint, 'cold-read write-back')
+    const stored = await this.putSoft(id, restoredRevision, restored.checkpoint, 'cold-read write-back')
+    if (stored) {
+      for (const session of detached) this.dropDirty(session)
+    }
     return restored.snapshot
   }
 
   // --- write-behind (throttle + mandatory points) ---
 
-  private installWritePath(): void {
+  private installWritePath(): () => void {
     // Every committed event advances the dirty counter; turn/end is a
     // mandatory point (the durable value most reads want is the turn-final
     // one), count/interval throttle the in-turn stream.
-    this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    const stopEvents = this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
       if (event.type === 'turn/end') {
+        this.markDirty(session)
         void this.flushSoft(session, 'turn/end')
         return
       }
-      const state = this.dirty.get(session) ?? { pending: 0, timer: undefined }
-      this.dirty.set(session, state)
-      state.pending += 1
-      if (state.pending >= this.config.writeEveryEvents) {
+      const state = this.markDirty(session)
+      if (state.pending >= this.config.writeEveryEvents && !this.operations.has(session.id)) {
         void this.flushSoft(session, 'count threshold')
         return
       }
-      state.timer ??= setTimeout(() => {
-        void this.flushSoft(session, 'interval')
-      }, this.config.writeIntervalMs)
+      this.armTimer(session)
     })
 
     // Detach (the live-to-cold moment): the second mandatory point. After
     // this write the cold-read ladder serves the session from the cache.
-    // flushSoft's synchronous prefix reads and resets the dirty state, so
-    // dropping it (timer already cleared by markClean) right after is safe.
-    this.ctx.on('session/disposed', (session: Session) => {
-      void this.flushSoft(session, 'detach')
-      this.markClean(session)
-      this.dirty.delete(session)
-    })
-
-    // Clear pending timers with the plugin (their sessions outlive the cache).
-    this.ctx.effect(() => () => {
-      for (const state of this.dirty.values()) {
-        if (state.timer !== undefined) clearTimeout(state.timer)
+    // Detach contributes its own retry token even when the Session had no
+    // cache-observed live event or its preceding checkpoint was already clean.
+    // The exact Session remains retained until log drain and cache put succeed.
+    const stopDisposals = this.ctx.on('session/disposed', (session: Session) => {
+      // A truly empty lifecycle has no materialized persistence revision to
+      // bind. Lazy persistence intentionally leaves it absent.
+      if (session.events.length === 0) {
+        this.dropDirty(session)
+        return
       }
-      this.dirty.clear()
-    }, 'sessionProjectionCache.timers')
+      this.markDirty(session).detached = true
+      const sessions = this.detached.get(session.id) ?? new Set<Session>()
+      sessions.add(session)
+      this.detached.set(session.id, sessions)
+      void this.flushSoft(session, 'detach')
+    })
+    return () => {
+      stopEvents()
+      stopDisposals()
+    }
   }
 
   /**
-   * One fail-soft durable checkpoint. Every caller has work by construction:
-   * the throttle triggers only fire dirty (markClean clears the timer with
-   * the counter) and the two mandatory points write unconditionally.
+   * One fail-soft automatic checkpoint. Every caller has work by construction:
+   * the throttle triggers only fire dirty and the two mandatory points write
+   * unconditionally. A live failure retains dirtiness for an interval retry;
+   * a detached failure retains the exact Session for interval or cold-read retry.
    */
   private async flushSoft(session: Session, trigger: string): Promise<void> {
+    const admitted = this.dirty.get(session)
+    if (admitted === undefined || admitted.pending === 0) return
     try {
-      await this.write(session)
+      await this.serialize(session.id, async () => {
+        // A cold repair or successful preceding write may have retired this
+        // exact automatic attempt while it waited behind another id operation.
+        if (this.dirty.get(session) !== admitted || admitted.pending === 0) return
+        const detachedHead = this.detached.get(session.id)?.values().next().value
+        if (detachedHead !== undefined && detachedHead !== session) {
+          this.armTimer(session)
+          return
+        }
+        await this.writeNow(session)
+      })
     } catch (error) {
       this.ctx.logger.warn(`session projection cache: ${trigger} write for "${session.id}" failed (cache stays stale): ${String(error)}`)
     }
   }
 
-  /** Reset one session's dirty bookkeeping (its checkpoint is being written). */
-  private markClean(session: Session): void {
+  /** Count one committed event so a failed write retains retryable work. */
+  private markDirty(session: Session): DirtyState {
+    const state = this.dirty.get(session) ?? { pending: 0, timer: undefined, detached: false }
+    this.dirty.set(session, state)
+    state.pending += 1
+    return state
+  }
+
+  /** Capture dirty work in this cut and cancel its superseded interval trigger. */
+  private beginWrite(session: Session): number {
     const state = this.dirty.get(session)
-    if (state === undefined) return
-    state.pending = 0
+    if (state === undefined) return 0
     if (state.timer !== undefined) {
       clearTimeout(state.timer)
       state.timer = undefined
     }
+    return state.pending
   }
 
-  /** Replace one session's stored record with its log identity and a detached snapshot of `rows`. */
-  private async put(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint): Promise<void> {
+  /** Mark only events included by a successful cut clean; later events remain dirty. */
+  private markClean(session: Session, includedDirtyEvents: number): void {
+    const state = this.dirty.get(session)
+    if (state === undefined) return
+    state.pending = Math.max(0, state.pending - includedDirtyEvents)
+    if (state.pending === 0) {
+      if (state.detached) {
+        this.dropDirty(session)
+      } else {
+        if (state.timer !== undefined) clearTimeout(state.timer)
+        state.timer = undefined
+      }
+      return
+    }
+    this.armTimer(session)
+  }
+
+  /** Arm one interval retry for a dirty live session. */
+  private armTimer(session: Session): void {
+    const state = this.dirty.get(session)
+    if (state === undefined || state.pending === 0 || state.timer !== undefined) return
+    state.timer = setTimeout(() => {
+      state.timer = undefined
+      void this.flushSoft(session, 'interval')
+    }, this.config.writeIntervalMs)
+  }
+
+  /** Remove one lifecycle's completed retry bookkeeping. */
+  private dropDirty(session: Session): void {
+    const state = this.dirty.get(session)
+    if (state?.timer !== undefined) clearTimeout(state.timer)
+    this.dirty.delete(session)
+    const detached = this.detached.get(session.id)
+    if (detached !== undefined) {
+      detached.delete(session)
+      if (detached.size === 0) this.detached.delete(session.id)
+    }
+  }
+
+  /** Replace one session's record with its observed log revision and a detached snapshot of `rows`. */
+  private async put(id: SessionId, revision: SessionPersistenceRevision, rows: ProjectionCheckpoint): Promise<void> {
     const detached = snapshotJsonValue(rows)
     if (detached === undefined) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
-    await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
+    await this.requireTable().put(id, { revision, rows: detached })
   }
 
-  /** Fail-soft {@link put}: cache writes must never fail their caller's read or event path. */
-  private async putSoft(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint, what: string): Promise<void> {
+  /** Fail-soft {@link put}: return whether the derived row became durable. */
+  private async putSoft(
+    id: SessionId,
+    revision: SessionPersistenceRevision,
+    rows: ProjectionCheckpoint,
+    what: string,
+  ): Promise<boolean> {
     try {
-      await this.put(id, identity, rows)
+      await this.put(id, revision, rows)
+      return true
     } catch (error) {
       this.ctx.logger.warn(`session projection cache: ${what} for "${id}" failed (cache stays stale): ${String(error)}`)
+      return false
     }
+  }
+
+  /** Serialize one cache operation after the prior operation for the same session id. */
+  private serialize<T>(id: SessionId, operation: () => Promise<T>): Promise<T> {
+    const prior = this.operations.get(id)
+    const current = prior === undefined
+      ? operation()
+      : prior.catch(() => {}).then(operation)
+    this.operations.set(id, current)
+    return current.finally(() => {
+      if (this.operations.get(id) === current) this.operations.delete(id)
+    })
   }
 
   private requireTable(): KvTable<SessionId, CheckpointRecord> {
@@ -285,16 +429,6 @@ export class SessionProjectionCache extends Service {
     if (this.table === undefined) throw new Error('session projection cache is not initialized')
     return this.table
   }
-}
-
-/** Project a header onto the identity fields a record is bound to. */
-function identityOf(header: SessionHeader): CheckpointIdentity {
-  return { createdAt: header.createdAt, ...header.cwd === undefined ? {} : { cwd: header.cwd } }
-}
-
-/** Whether a stored record's bound identity names the caller's lifecycle. */
-function identityMatches(stored: CheckpointIdentity, expected: CheckpointIdentity): boolean {
-  return stored.createdAt === expected.createdAt && stored.cwd === expected.cwd
 }
 
 export default SessionProjectionCache

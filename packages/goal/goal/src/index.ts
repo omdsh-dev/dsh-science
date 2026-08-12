@@ -80,6 +80,8 @@ const goalProjectionSchema: ZodType<GoalProjection | null> = zod.union([
   zod.null(),
 ]) as ZodType<GoalProjection | null>
 
+const goalProjectionDefinitionToken = Symbol('goal projection definition')
+
 /**
  * Light last-wins fold of the `goal` projection unit. Unlike the strict
  * replay fold (fold.ts: transition validation, fail-loud on malformed
@@ -204,6 +206,7 @@ export class GoalService extends TypertRemoteService {
     ctx.inject(['sessionProjections'], (projectionCtx) => {
       projectionCtx.sessionProjections.register<'goal', GoalProjection | null>({
         key: 'goal',
+        definitionToken: goalProjectionDefinitionToken,
         schema: goalProjectionSchema,
         init: () => null,
         apply: applyGoalProjection,

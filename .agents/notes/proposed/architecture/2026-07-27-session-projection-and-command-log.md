@@ -20,7 +20,7 @@ Four infrastructure pieces, then the domains become pure contributors.
 
 ### Whole-value event rule
 
-A state-carrying log event MUST carry the complete post-change state, never a bare delta. All three domains already comply: `todo/write` is a whole-list snapshot, `plan/mode` a whole boolean, `goal/change` metadata a full `GoalSnapshot` (or a whole-value clear tombstone). The rule keeps every domain's transition trivially cheap (the framework drives it per event), keeps values self-describing on the wire, and lets any consumer treat the latest pushed value as final — out-of-order immunity by seq comparison, self-healing because a missed update is corrected by the next one.
+A state-carrying log event MUST carry the complete post-change state, never a bare delta. The three listed whole-value domains comply: `todo/write` is a whole-list snapshot, `plan/mode` a whole boolean, `goal/change` metadata a full `GoalSnapshot` (or a whole-value clear tombstone). The rule keeps those transitions cheap (the framework drives them per event), keeps values self-describing on the wire, and lets any consumer treat the latest pushed value as final — out-of-order immunity by seq comparison, self-healing because a missed update is corrected by the next one. A fact/provenance domain may instead own a strict multi-event fold and its transition cost; the registry still serves only its finished value.
 
 ### Host projection registry (`dsh-session-projection`, new package)
 
@@ -33,13 +33,21 @@ export interface SessionProjectionMap {}   // the single type table for the whol
 
 export interface ProjectionDefinition<K extends keyof SessionProjectionMap, S> {
   key: K
+  /** Module-private identity of one interchangeable definition family. */
+  definitionToken: symbol
   schema: ZodType<SessionProjectionMap[K]>  // validates the payload before it leaves the host
+  /** Optional parser for untrusted persisted private state; never runs on the live path. */
+  checkpointStateSchema?: ZodType<S>
+  /** Optional pure extractor binding self-watermarked private state to the row's outer seq. */
+  checkpointStateSeq?(state: S): number
   /** State for the empty log. */
   init(): S
   /** Pure transition: previous state + one event → next state. The framework drives it; domains hold no subscriptions. */
   apply(state: S, event: SessionEvent): S
   /** State → wire payload (the read-side projection). */
   view(state: S): SessionProjectionMap[K]
+  /** Optional narrowing predicate when changed private state may preserve the public view. */
+  viewChanged?(previous: S, next: S): boolean
   /** State must be plain JSON (persisted-cache precondition); bump to invalidate persisted rows. */
   stateVersion: number
 }
@@ -50,10 +58,11 @@ declare module 'cordis' {
 ```
 
 - Values are wire JSON payloads; the same map typed end to end (host unit, wire block, React hook) via `import type` — no second DTO table, no separate client-side "views" map. How a value is *rendered* is the slot system's business, never the projection layer's.
-- **The host is the only place a projection is computed.** The framework drives every registered unit forward eagerly: each committed session event passes through `apply`; a unit uninterested in an event returns the same state reference, and an unchanged reference (`Object.is`) produces no downstream work. Clients never fold domain events — they receive finished values (baseline block + push frame below). This removes the double-implementation trap (plan's two-event fold written once, on the host) and any client-side domain code.
-- **State is always computed, never logged.** The log holds events only; the unit's state lives in the framework's per-session watermark cache (`{state, observedSeq}` per unit) and, in a later phase, in a **persisted projection cache** on the domain-KV storage seam: rows of `(sessionId, key, ver, seq, val)` (`ver` = the unit's `stateVersion`, `seq` = the watermark, `val` = the state JSON). A row is never wrong, only possibly stale — its `seq` says exactly how stale. The one read recipe, cold and live alike: take the cached state (or `init()`), forward-apply only the events past its watermark, `view` the result. Cold listings (every session's title across all workspaces) become an index read plus, at worst, a short tail replay; the session-persistence seam grows a read-from-seq primitive for that tail in the same later phase. Write policy: throttled (count/interval, configurable) plus two mandatory points — `turn/end` and detach (the live-to-cold moment). A crash between writes costs a longer tail replay, never a wrong value.
+- **The host is the only place a projection is computed.** The framework drives every registered unit forward eagerly: each committed session event passes through `apply`. A unit returns the same reference when neither public value nor private proof advances. Drive is two-phase: every successful unit commits its state and watermark before any public view or notification runs, so a re-entrant snapshot cannot observe a half-applied registry cut. An apply failure invalidates only that unit's cell for a full-log retry, while later units still receive the event. `Object.is` is the first notification gate. A domain whose private replay state advances without changing its public value supplies `viewChanged`; predicate/view/listener failures are contained after state progress. Clients never fold domain events — they receive finished, detached JSON values (baseline block + push frame below).
+- **State is always computed, never logged.** The log holds events only; the unit's state lives in the framework's per-session watermark cache (`{state, observedSeq}` per unit) and in a **persisted projection cache** on the domain-KV storage seam: rows of `(sessionId, key, ver, seq, val)`. A row is a non-authoritative shortcut and may be stale, version-incompatible, or schema-invalid. `checkpointStateSchema` is admission-only: its output must be JSON-deep-equal to its input, never a read-time migration. A provenance-heavy unit also implements the pure `checkpointStateSeq`; its private state advances its encoded watermark on every committed event, and emitted/admitted state must equal the row's outer `seq`, preventing an older valid state from being spliced beneath a newer watermark. Public values, listener values, and checkpoint state are independently detached plain JSON. Rejected rows are absent from zero-I/O views and force a full replay before restore.
+- **The cache follows durable log order.** Cold and live reads take admitted cached state (or `init()` after a full read), forward-apply only events past its watermark, then `view`. A zero-I/O snapshot is served only when all admitted rows form one exact watermark cut. Writes are throttled (count/interval) plus mandatory at `turn/end` and detach. Per-session-id operations serialize; each write snapshots inside that serialization, waits for the exact live or retiring Session lifecycle to drain through session persistence, then replaces the cache record. A crash or failed cache write may leave a revision-mismatched cut that is discarded and fully replayed, but never one ahead of the log; an older concurrent write cannot overwrite a newer cut.
 - A domain's input event set is its own choice: todos folds `todo/write` alone; plan folds `plan/mode` plus its own `/plan` `command/run` records (see the plan section); goal folds `goal/change` metadata; session title folds its title events (retiring the bespoke `session/title` frame and the client's title-snapshot map — the fourth hand-rolled projection this seam absorbs).
-- Registration is an effect (disposer with the fiber): an unloaded plugin's key disappears from subsequent responses and the client reads it as capability absence — HMR semantics for free. Duplicate keys throw. Domain plugins register under `ctx.inject(['sessionProjections'], …)` so headless assemblies without the registry stay unaffected.
+- Registration is an effect owned by the calling fiber. Repeated composition shares one canonical definition and its cells only when key, module-private `definitionToken`, and `stateVersion` all match; any other active owner conflicts, so a version number is never mistaken for proof that two functions have the same owner or semantics. During real Cordis HMR overlap, a replacement may take over once all prior owners are unloading; a changed token or version rebuilds cells from the log. If that replacement exits before old cleanup finishes, the registry never republishes the stale unloading definition. The last live disposer removes the key. Domain plugins register under `ctx.inject(['sessionProjections'], …)` so headless assemblies without the registry stay unaffected.
 - The package owns `./invariant` (every served key has a live registration).
 
 ### Shipped consumer: the subagent identity unit
@@ -83,9 +92,9 @@ Because the host is the only computation site, finished values reach clients ove
 { type: 'session/projection', sessionId, key: string, value: unknown, seq: number }
 ```
 
-The framework emits it whenever a unit's state reference changes (`Object.is` gate above); `seq` is the unit's watermark at emission. This is live push state, never logged — the same posture as the tool-view `view` slot: replay recomputes on the host.
+The framework emits it when `apply` returns a different state reference and the optional narrowing `viewChanged` predicate does not suppress that transition; `seq` is the unit's watermark at emission. A predicate cannot turn a same-reference no-op into a change. This is live push state, never logged — the same posture as the tool-view `view` slot: replay recomputes on the host.
 
-The client object layer keeps one **generic value store** per session: `key → { value, seq }`, seeded by the tail page's projections block and updated by the frame, under the single rule **higher seq wins**. Replayed baselines cannot roll a newer frame back; a lost frame costs staleness until the next frame or baseline, never wrongness. No `fromEvent`, no per-domain cell registration, no client-side domain folding — a domain ships projection support with **zero client code** (the `SessionProjectionMap` merge serves both sides through the `/types` outlet). The bespoke `session/title` frame and the manager's title-snapshot map retire into this generic pair. All the per-domain fences (#587's three layers, #527's write revision) dissolve into the one seq rule.
+The client object layer keeps one **generic value store** per session: `key → { value, seq }`, seeded by the tail page's projections block and updated by the frame, under the single rule **higher seq wins**. A replayed baseline cannot replace a value already observed at a higher seq; a lost frame leaves the client stale until the next frame or baseline. Semantic correctness still comes from the host fold and the cache row's lifecycle binding, not from the merge rule. No `fromEvent`, no per-domain cell registration, no client-side domain folding — a domain ships projection support with **zero client code** (the `SessionProjectionMap` merge serves both sides through the `/types` outlet). The bespoke `session/title` frame and the manager's title-snapshot map retire into this generic pair. All the per-domain fences (#587's three layers, #527's write revision) dissolve into the one seq rule.
 
 ### Plan through the standard command channel (worked example)
 

@@ -7,7 +7,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionPreparation } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionPersistenceRevision } from './revision.ts'
 
 // Re-export the metadata vocabulary so Consumers import it from the Service Definition.
@@ -17,9 +17,9 @@ export { SessionPersistenceRevision } from './revision.ts'
 /** Lightweight immutable source identity returned without loading a full log. */
 export interface SessionPersistenceSnapshot {
   /** Detached metadata for one materialized session. */
-  header: SessionHeader
+  readonly header: SessionHeader
   /** Opaque source-qualified token that changes whenever this stored log changes. */
-  revision: SessionPersistenceRevision
+  readonly revision: SessionPersistenceRevision
 }
 
 /** Immutable logical session prepared from persistence or a live owner. */
@@ -215,10 +215,27 @@ export abstract class SessionPersistence extends Service {
    * @param id - the persisted session to read.
    * @param fromSeq - first event seq to include; a non-negative safe integer.
    * @param signal - optional cancellation for queued and backend read work.
-   * @returns the header and the stored events with `seq >= fromSeq`.
+   * @returns the header and stored events with `seq >= fromSeq`, plus the
+   * source-qualified revision of that same physical read cut.
    */
   abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal):
-  Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+  Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }>
+
+  /**
+   * Wait until every event admitted for one exact Session lifecycle is durable.
+   * Unlike `ctx.sessions.flush(session)`, this remains valid after the Session
+   * has detached from its store and therefore covers the disposal-retirement
+   * drain. Consumers that persist derived state at detach use this as their
+   * ordering barrier. Implementations that do not track live Session
+   * lifecycles reject instead of claiming durability they cannot establish.
+   * @param session - the live or just-detached lifecycle to drain.
+   * @returns the source-qualified revision observed after that lifecycle's
+   * admitted events are durable.
+   */
+  drain(session: Session): Promise<SessionPersistenceRevision> {
+    void session
+    return Promise.reject(new Error('this session persistence backend does not track live lifecycle durability'))
+  }
 
   /**
    * Lightweight listing from metadata, without a full-log parse.

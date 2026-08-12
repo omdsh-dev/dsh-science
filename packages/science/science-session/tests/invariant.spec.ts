@@ -1,24 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import InvariantRegistry, { InvariantError } from '@deepseek-ai/dsh-invariants'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import * as ScienceInvariant from '../src/invariant.ts'
 import {
-  ScienceChartId,
   ScienceEnvironmentProfileId,
   ScienceRunId,
   ScienceScratchKey,
 } from '../src/index.ts'
-import type { ScienceRunStarted } from '../src/index.ts'
+import {
+  FINGERPRINT,
+  appendFixtureEvents,
+} from './fixtures.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-science-session'
-const FINGERPRINT = 'b'.repeat(64)
-const RUN_ID = ScienceRunId('run-1')
-const CHART_ID = ScienceChartId('chart-1')
-const OUTCOME_CALL_ID = CallId('call-outcome')
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
@@ -36,117 +33,7 @@ function appendMode(session: Session): number {
 }
 
 function appendLegalChain(session: Session): void {
-  const modeTime = appendMode(session)
-  session.append('science/environment-bound', {
-    version: 1,
-    environment: {
-      revision: 1,
-      profileId: ScienceEnvironmentProfileId('profile-1'),
-      configuredAt: modeTime,
-      validatedAt: modeTime,
-      status: 'applied',
-      python: {
-        language: 'python',
-        configuredPrefix: '/opt/science',
-        canonicalPrefix: '/opt/science',
-        executable: '/opt/science/bin/python',
-        executableIdentity: 'dev:1-ino:2',
-        languageVersion: '3.13.5',
-        condaHistorySha256: 'a'.repeat(64),
-        bindingFingerprint: FINGERPRINT,
-        capability: 'available',
-      },
-    },
-  })
-  const request = session.append('request/header', {
-    header: { config: { provider: 'test', model: 'test-model' } },
-    reason: 'initial',
-  })
-  const runCallId = CallId('call-run')
-  const runCall = session.append('tool/call', {
-    turn: 1,
-    step: 1,
-    callId: runCallId,
-    name: 'run_python',
-    arguments: '{}',
-  })
-  const run: ScienceRunStarted = {
-    runId: RUN_ID,
-    language: 'python',
-    toolCallId: runCallId,
-    requestHeaderSeq: request.seq,
-    environmentRevision: 1,
-    environmentFingerprint: FINGERPRINT,
-    startedAt: runCall.time,
-    codeSha256: 'c'.repeat(64),
-    scratchKey: ScienceScratchKey('d'.repeat(64)),
-    runDirectoryRef: 'runs/run-1/',
-    status: 'running',
-  }
-  const runStart = session.append('science/run-started', { version: 1, run })
-  const runFinish = session.append('science/run-finished', {
-    version: 1,
-    run: {
-      ...run,
-      status: 'success',
-      finishedAt: runStart.time,
-      exitCode: 0,
-      stdoutBytes: 12,
-      stderrBytes: 0,
-      stdoutTruncated: false,
-      stderrTruncated: false,
-    },
-  })
-  const chartCallId = CallId('call-chart')
-  const chartCall = session.append('tool/call', {
-    turn: 1,
-    step: 1,
-    callId: chartCallId,
-    name: 'save_chart',
-    arguments: '{}',
-  })
-  const chartSaved = session.append('science/chart-saved', {
-    version: 1,
-    chart: {
-      chartId: CHART_ID,
-      logicalName: 'trend',
-      version: 1,
-      title: 'Trend',
-      attachment: {
-        attachmentId: AttachmentId('attachment-1'),
-        mediaType: 'image/png',
-        bytes: 128,
-        width: 16,
-        height: 9,
-      },
-      runId: RUN_ID,
-      toolCallId: chartCallId,
-      requestHeaderSeq: request.seq,
-      environmentRevision: 1,
-      environmentFingerprint: FINGERPRINT,
-      createdAt: Math.max(runFinish.time, chartCall.time),
-    },
-  })
-  const outcomeCall = session.append('tool/call', {
-    turn: 1,
-    step: 1,
-    callId: OUTCOME_CALL_ID,
-    name: 'publish_outcome',
-    arguments: '{}',
-  })
-  session.append('science/outcome-published', {
-    version: 1,
-    outcome: {
-      revision: 1,
-      title: 'Result',
-      summaryMarkdown: 'The trend is stable.',
-      evidence: [{ kind: 'chart', chartId: CHART_ID, version: 1 }],
-      publishedAt: Math.max(chartSaved.time, outcomeCall.time),
-      toolCallId: OUTCOME_CALL_ID,
-      requestHeaderSeq: request.seq,
-      environmentRevisions: [1],
-    },
-  })
+  appendFixtureEvents(session)
 }
 
 describe('Science stream invariant', () => {

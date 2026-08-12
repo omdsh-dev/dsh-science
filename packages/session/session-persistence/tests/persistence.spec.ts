@@ -58,7 +58,15 @@ interface CoordinatorInternals {
     writes: { pending: unknown[]; active: Promise<void> | undefined; hasWork: boolean }
   }>
   chains: Map<unknown, unknown>
-  retirements: Map<unknown, Promise<void>>
+  retirements: Map<unknown, {
+    session: Session
+    completion: PromiseWithResolvers<SessionPersistenceRevision | undefined>
+    attempt?: Promise<SessionPersistenceRevision | undefined>
+  }>
+  retirementStates: WeakMap<Session, {
+    attempt?: Promise<SessionPersistenceRevision | undefined>
+  }>
+  lifecycleRetirements: WeakMap<Session, Promise<SessionPersistenceRevision | undefined>>
 }
 
 /**
@@ -114,8 +122,12 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
       .then(loaded => ({ meta: loaded.meta, events: [...loaded.events] }))
   }
 
-  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): ReturnType<PersistenceCoordinator['readFrom']> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  override drain(session: Session): ReturnType<PersistenceCoordinator['drain']> {
+    return this.coordinator.drain(session)
   }
 
   // --- PersistenceBackend hooks (the Map storage primitives) ---
@@ -136,7 +148,11 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return entry === undefined ? undefined : memoryRevision(entry)
   }
 
-  async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
+  async appendBatch(
+    m: SessionHeader,
+    events: readonly SessionEvent[],
+    _isMaterialized: boolean,
+  ): Promise<SessionPersistenceRevision> {
     // Defense-in-depth: the coordinator already validates serializability, but a
     // durable store must reject non-JSON data at its own boundary too.
     for (const e of events) {
@@ -149,16 +165,25 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     } else {
       existing.events.push(...structuredClone(events) as SessionEvent[])
     }
+    const stored = this.store.get(m.id)
+    /* v8 ignore next -- this method just created or updated the entry */
+    if (stored === undefined) throw new Error('memory append lost its entry')
+    return memoryRevision(stored)
   }
 
-  async commitRepair(m: SessionHeader, _tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void> {
+  async commitRepair(
+    m: SessionHeader,
+    _tornMarker: undefined,
+    closers: readonly SessionEvent[],
+  ): Promise<SessionPersistenceRevision> {
     // No torn tails in a Map store, so `_tornMarker` is always undefined; only the
     // synthetic closers are appended (the same DELETE+INSERT a DB backend does,
     // minus the truncate).
     const entry = this.store.get(m.id)
     /* v8 ignore next -- commitRepair only runs for a materialized (stored) session */
-    if (!entry) return
+    if (!entry) throw new Error('memory repair lost its entry')
     if (closers.length > 0) entry.events.push(...structuredClone(closers) as SessionEvent[])
+    return memoryRevision(entry)
   }
 
   async list(signal?: AbortSignal): Promise<SessionHeader[]> {
@@ -184,6 +209,7 @@ class ControlledBackend implements PersistenceBackend<never> {
   loadAttempts = 0
   repairAttempts = 0
   beforeAppend?: (attempt: number) => Promise<void>
+  afterAppend?: (revision: SessionPersistenceRevision, attempt: number) => Promise<void>
   beforeLoadStored?: (attempt: number, signal?: AbortSignal) => Promise<void>
   /** When set, the declared seek hook delegates here so readFrom exercises it; unset throws (tests set it first). */
   seekHook?: (id: SessionId, fromSeq: number, signal?: AbortSignal) => Promise<StoredSuffix | undefined>
@@ -211,7 +237,11 @@ class ControlledBackend implements PersistenceBackend<never> {
     return entry === undefined ? undefined : memoryRevision(entry)
   }
 
-  async appendBatch(m: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
+  async appendBatch(
+    m: SessionHeader,
+    events: readonly SessionEvent[],
+    _isMaterialized: boolean,
+  ): Promise<SessionPersistenceRevision> {
     const attempt = ++this.appendAttempts
     await this.beforeAppend?.(attempt)
     const entry = this.store.get(m.id)
@@ -220,12 +250,24 @@ class ControlledBackend implements PersistenceBackend<never> {
     } else {
       entry.events.push(...structuredClone(events) as SessionEvent[])
     }
+    const stored = this.store.get(m.id)
+    /* v8 ignore next -- this method just created or updated the entry */
+    if (stored === undefined) throw new Error('controlled append lost its entry')
+    const revision = memoryRevision(stored)
+    await this.afterAppend?.(revision, attempt)
+    return revision
   }
 
-  async commitRepair(m: SessionHeader, _tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void> {
+  async commitRepair(
+    m: SessionHeader,
+    _tornMarker: undefined,
+    closers: readonly SessionEvent[],
+  ): Promise<SessionPersistenceRevision> {
     this.repairAttempts += 1
     const entry = this.store.get(m.id)
-    if (entry !== undefined) entry.events.push(...structuredClone(closers) as SessionEvent[])
+    if (entry === undefined) throw new Error('controlled repair lost its entry')
+    entry.events.push(...structuredClone(closers) as SessionEvent[])
+    return memoryRevision(entry)
   }
 
   async list(): Promise<SessionHeader[]> {
@@ -1022,6 +1064,7 @@ describe('PersistenceCoordinator session preparations', () => {
         { type: 'turn/start', seq, time: 3, data: { turn: 2 } },
         { type: 'turn/end', seq: seq + 1, time: 4, data: { turn: 2, reason: { kind: 'completed' } } },
       )
+      return memoryRevision(entry)
     })
     let coordinator!: PersistenceCoordinator<never>
     const fiber = await ctx.plugin(Object.assign((inner: Context) => {
@@ -1059,8 +1102,9 @@ describe('PersistenceCoordinator session preparations', () => {
     })
     const commitRepair = backend.commitRepair.bind(backend)
     vi.spyOn(backend, 'commitRepair').mockImplementation(async (header, tornMarker, closers) => {
-      await commitRepair(header, tornMarker, closers)
+      const revision = await commitRepair(header, tornMarker, closers)
       backend.store.delete(id)
+      return revision
     })
     let coordinator!: PersistenceCoordinator<never>
     const fiber = await ctx.plugin(Object.assign((inner: Context) => {
@@ -1298,10 +1342,17 @@ describe('PersistenceCoordinator observation cancellation', () => {
       backend.seekHook = async (hookId, fromSeq) => {
         const entry = backend.store.get(hookId)
         if (entry === undefined) return undefined
-        return { meta: structuredClone(entry.meta), events: entry.events.filter(e => e.seq >= fromSeq) }
+        return {
+          meta: structuredClone(entry.meta),
+          events: entry.events.filter(e => e.seq >= fromSeq),
+          revision: memoryRevision(entry),
+        }
       }
       const suffix = await coordinator.readFrom(id, 3)
       expect(suffix.events).toEqual(log.slice(3))
+      const stored = backend.store.get(id)
+      if (stored === undefined) throw new Error('seek fixture disappeared')
+      expect(suffix.revision).toBe(memoryRevision(stored))
       // The hook's `undefined` is the backend contract's not-found result.
       await expect(coordinator.readFrom(SessionId('missing-seek'), 0)).rejects.toThrow('not found')
 
@@ -1383,6 +1434,172 @@ describe('PersistenceCoordinator observation cancellation', () => {
 })
 
 describe('PersistenceCoordinator retirement', () => {
+  it('drain waits for the exact detached lifecycle retirement to become durable', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const appendGate = Promise.withResolvers<undefined>()
+    backend.beforeAppend = async () => { await appendGate.promise }
+
+    try {
+      let session!: Session
+      const owner = await ctx.plugin(Object.assign((inner: Context) => {
+        session = inner.sessions.create(SessionId('exact-retirement-drain'))
+      }, { inject: ['sessions'] }))
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+      await owner.dispose()
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+      let settled = false
+      const drained = coordinator.drain(session).then((revision) => {
+        settled = true
+        return revision
+      })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      expect(backend.store.get(session.id)).toBeUndefined()
+
+      appendGate.resolve(undefined)
+      const revision = await drained
+      expect(backend.store.get(session.id)?.events.map(event => event.seq)).toEqual([0, 1])
+      const stored = backend.store.get(session.id)
+      if (stored === undefined) throw new Error('drained session was not materialized')
+      expect(revision).toBe(memoryRevision(stored))
+    } finally {
+      appendGate.resolve(undefined)
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('returns the committed append revision when the same id is replaced before drain resolves', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    let committedRevision: SessionPersistenceRevision | undefined
+
+    try {
+      const id = SessionId('drain-revision-replacement')
+      const session = ctx.sessions.create(id)
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      backend.afterAppend = async (revision) => {
+        committedRevision = revision
+        backend.store.set(id, {
+          meta: { ...meta(id), createdAt: 999 },
+          events: oneTurnLog(),
+        })
+      }
+      const revisionLookup = vi.spyOn(backend, 'readStoredRevision')
+
+      const drainedRevision = await coordinator.drain(session)
+      const replacement = backend.store.get(id)
+      if (replacement === undefined || committedRevision === undefined) {
+        throw new Error('test replacement was not installed')
+      }
+      expect(drainedRevision).toBe(committedRevision)
+      expect(drainedRevision).not.toBe(memoryRevision(replacement))
+      expect(revisionLookup).not.toHaveBeenCalled()
+    } finally {
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('retries repeated detached retirement failures and blocks same-id preparation until cleanup', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const firstFailure = new Error('first retirement append failed')
+    const secondFailure = new Error('second retirement append failed')
+    const thirdAttempt = Promise.withResolvers<undefined>()
+    backend.beforeAppend = (attempt) => {
+      if (attempt === 1) return Promise.reject(firstFailure)
+      if (attempt === 2) return Promise.reject(secondFailure)
+      return thirdAttempt.promise
+    }
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      let session!: Session
+      const owner = await ctx.plugin(Object.assign((inner: Context) => {
+        session = inner.sessions.create(SessionId('retry-retirement-drain'))
+      }, { inject: ['sessions'] }))
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+      await owner.dispose()
+      const internals = coordinator as unknown as CoordinatorInternals
+      await vi.waitFor(() => {
+        expect(backend.appendAttempts).toBe(1)
+        expect(internals.lifecycleRetirements.has(session)).toBe(false)
+      })
+
+      await expect(coordinator.drain(session)).rejects.toBe(secondFailure)
+      await vi.waitFor(() => {
+        expect(backend.appendAttempts).toBe(2)
+        expect(internals.lifecycleRetirements.has(session)).toBe(false)
+        expect(internals.retirements.get(session.id)?.attempt).toBeUndefined()
+      })
+
+      const thirdDrain = coordinator.drain(session)
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(3) })
+      let preparationSettled = false
+      const preparing = coordinator.prepare(session.id).finally(() => { preparationSettled = true })
+      await Promise.resolve()
+      expect(preparationSettled).toBe(false)
+      expect(internals.retirements.has(session.id)).toBe(true)
+
+      thirdAttempt.resolve(undefined)
+      const revision = await thirdDrain
+      const stored = backend.store.get(session.id)
+      if (stored === undefined) throw new Error('retried session was not materialized')
+      expect(revision).toBe(memoryRevision(stored))
+      expect(internals.live.has(session)).toBe(false)
+      expect(internals.states.has(session.id)).toBe(false)
+
+      const preparation = await preparing
+      expect(preparation.session.events.slice(0, 2).map(event => event.seq)).toEqual([0, 1])
+      expect(preparation.session.events[2]).toMatchObject({ type: 'session/end-seed', seq: 2 })
+      preparation[Symbol.dispose]()
+    } finally {
+      thirdAttempt.resolve(undefined)
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drain rejects an untracked Session lifecycle instead of claiming durability', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      const foreign = Session.create(SessionId('untracked-drain'))
+      await expect(coordinator.drain(foreign)).rejects.toThrow(/lifecycle is not tracked/)
+    } finally {
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('a retiring unmaterialized owner without buffered events releases its id', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -1455,23 +1672,23 @@ describe('PersistenceCoordinator retirement', () => {
       await firstFiber.dispose()
       await vi.waitFor(() => { expect(internals.retirements.has(id)).toBe(true) })
       const firstRetirement = internals.retirements.get(id)
+      const firstAttempt = firstRetirement?.attempt
 
-      // Successor lifecycle retires while the first drain is still in flight:
-      // retire() replaces the map entry synchronously.
+      // The successor becomes the id-level tail but keeps the first exact
+      // retirement as its predecessor.
       const secondFiber = await ctx.plugin(Object.assign((inner: Context) => {
         inner.sessions.create(id)
       }, { inject: ['sessions'] }))
       await secondFiber.dispose()
-      await vi.waitFor(() => {
-        expect(internals.retirements.get(id)).not.toBe(firstRetirement)
-      })
+      const secondRetirement = internals.retirements.get(id)
+      expect(secondRetirement).not.toBe(firstRetirement)
+      expect(secondRetirement?.attempt).toBeDefined()
 
-      // Release the chain: the first drain settles and its forget() must not
-      // delete the successor's entry (exact-entry guard); the successor's own
-      // forget() then clears the map.
+      // Release the chain: completing the first exact state must not delete the
+      // successor tail; the successor then runs and clears only its own entry.
       readGate.resolve(true)
       expect(await parked).toBeInstanceOf(Error) // the parked inspect (not found) is observed
-      await firstRetirement
+      await firstAttempt
       await vi.waitFor(() => { expect(internals.retirements.has(id)).toBe(false) })
     } finally {
       readGate.resolve(true)
@@ -1480,7 +1697,181 @@ describe('PersistenceCoordinator retirement', () => {
     }
   })
 
-  it('a replacement queued before retirement cleanup still collides with the live owner', async () => {
+  it('retries an older exact lifecycle after it fails behind a queued same-id successor', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const firstAttempt = Promise.withResolvers<undefined>()
+    const retryGate = Promise.withResolvers<undefined>()
+    backend.beforeAppend = async (attempt) => {
+      if (attempt === 1) {
+        await firstAttempt.promise
+        throw new Error('older retirement failed')
+      }
+      if (attempt === 2) await retryGate.promise
+    }
+    backend.seekHook = async (id, fromSeq) => {
+      const stored = backend.store.get(id)
+      if (stored === undefined) return undefined
+      return {
+        meta: structuredClone(stored.meta),
+        events: structuredClone(stored.events.filter(event => event.seq >= fromSeq)),
+        revision: memoryRevision(stored),
+      }
+    }
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      const id = SessionId('queued-successor-before-failure')
+      let first!: Session
+      const firstFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        first = inner.sessions.create(id)
+      }, { inject: ['sessions'] }))
+      first.append('turn/start', { turn: 1 })
+      first.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await firstFiber.dispose()
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+
+      let successor!: Session
+      const successorFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        successor = inner.sessions.create(id, { seed: first.events })
+      }, { inject: ['sessions'] }))
+      await successorFiber.dispose()
+      const internals = coordinator as unknown as CoordinatorInternals
+      expect(internals.retirements.get(id)?.session).toBe(successor)
+
+      firstAttempt.resolve(undefined)
+      await vi.waitFor(() => {
+        expect(internals.retirementStates.get(first)?.attempt).toBeUndefined()
+        expect(internals.retirements.get(id)?.session).toBe(successor)
+      })
+
+      const successorDrain = coordinator.drain(successor)
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(2) })
+      retryGate.resolve(undefined)
+      const revision = await successorDrain
+      expect(backend.appendAttempts).toBe(3)
+      expect(internals.retirements.has(id)).toBe(false)
+      const stored = backend.store.get(id)
+      expect(stored?.events.map(event => event.seq)).toEqual([0, 1, 2])
+      if (stored === undefined) throw new Error('successor retirement was not materialized')
+      expect(revision).toBe(memoryRevision(stored))
+    } finally {
+      firstAttempt.resolve(undefined)
+      retryGate.resolve(undefined)
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects a cold read promptly when its failed retirement retry also fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    backend.beforeAppend = async () => { throw new Error('retirement remains unavailable') }
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      const id = SessionId('bounded-retirement-read-failure')
+      let session!: Session
+      const owner = await ctx.plugin(Object.assign((inner: Context) => {
+        session = inner.sessions.create(id)
+      }, { inject: ['sessions'] }))
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await owner.dispose()
+      const internals = coordinator as unknown as CoordinatorInternals
+      await vi.waitFor(() => {
+        expect(backend.appendAttempts).toBe(1)
+        expect(internals.retirementStates.get(session)?.attempt).toBeUndefined()
+      })
+
+      await expect(coordinator.readFrom(id, 0)).rejects.toThrow('retirement remains unavailable')
+      expect(backend.appendAttempts).toBe(2)
+      expect(internals.retirements.has(id)).toBe(true)
+    } finally {
+      try {
+        await backendFiber.dispose()
+      } catch {
+        // The persistent backend failure is the behavior under test.
+      }
+      try {
+        await ctx.fiber.dispose()
+      } catch {
+        // The child teardown failure was already contained above.
+      }
+    }
+  })
+
+  it('readFrom waits for a successor retirement queued while an older tail is settling', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const firstGate = Promise.withResolvers<undefined>()
+    const successorGate = Promise.withResolvers<undefined>()
+    backend.beforeAppend = async (attempt) => {
+      if (attempt === 1) await firstGate.promise
+      if (attempt === 2) await successorGate.promise
+    }
+    backend.seekHook = async (id, fromSeq) => {
+      const stored = backend.store.get(id)
+      if (stored === undefined) return undefined
+      return {
+        meta: structuredClone(stored.meta),
+        events: structuredClone(stored.events.filter(event => event.seq >= fromSeq)),
+        revision: memoryRevision(stored),
+      }
+    }
+
+    try {
+      const id = SessionId('growing-retirement-tail')
+      let first!: Session
+      const firstFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        first = inner.sessions.create(id)
+      }, { inject: ['sessions'] }))
+      first.append('turn/start', { turn: 1 })
+      first.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await firstFiber.dispose()
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+
+      let readSettled = false
+      const read = coordinator.readFrom(id, 0).finally(() => { readSettled = true })
+      let successor!: Session
+      const successorFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        successor = inner.sessions.create(id, { seed: first.events })
+      }, { inject: ['sessions'] }))
+      await successorFiber.dispose()
+
+      firstGate.resolve(undefined)
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(2) })
+      expect(readSettled).toBe(false)
+
+      successorGate.resolve(undefined)
+      await expect(read).resolves.toMatchObject({
+        events: [{ seq: 0 }, { seq: 1 }, { seq: 2 }],
+      })
+      expect(successor.id).toBe(id)
+    } finally {
+      firstGate.resolve(undefined)
+      successorGate.resolve(undefined)
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('a same-tick replacement waits for retirement cleanup before resolving its collision', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const backend = new ControlledBackend()
@@ -1507,12 +1898,71 @@ describe('PersistenceCoordinator retirement', () => {
         reuse = inner.sessions.create(id)
       }, { inject: ['sessions'] }))
       const reuseFlush = ctx.sessions.flush(reuse)
+      let replacementSettled = false
+      void reuseFlush.finally(() => { replacementSettled = true }).catch(() => {})
+      await Promise.resolve()
+      expect(replacementSettled).toBe(false)
 
       appendGate.resolve(true)
-      await expect(reuseFlush).rejects.toThrow(/bound to a different live session/)
+      await expect(reuseFlush).rejects.toThrow(/persisted log.*does not match.*id collision/)
       expect(backend.store.get(id)?.events.map(event => event.seq)).toEqual([0, 1])
     } finally {
       appendGate.resolve(true)
+      await backendFiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps a same-id successor pending across a failed retirement until retry succeeds', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const retryGate = Promise.withResolvers<undefined>()
+    backend.beforeAppend = async (attempt) => {
+      if (attempt === 1) throw new Error('first retirement failed')
+      if (attempt === 2) throw new Error('second retirement failed')
+      await retryGate.promise
+    }
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      const id = SessionId('failed-retirement-successor')
+      let first!: Session
+      const firstFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        first = inner.sessions.create(id)
+      }, { inject: ['sessions'] }))
+      first.append('turn/start', { turn: 1 })
+      first.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await firstFiber.dispose()
+      const internals = coordinator as unknown as CoordinatorInternals
+      await vi.waitFor(() => {
+        expect(backend.appendAttempts).toBe(1)
+        expect(internals.retirements.get(id)?.attempt).toBeUndefined()
+      })
+
+      let successor!: Session
+      await ctx.plugin(Object.assign((inner: Context) => {
+        successor = inner.sessions.create(id, { seed: first.events })
+      }, { inject: ['sessions'] }))
+      await vi.waitFor(() => {
+        expect(backend.appendAttempts).toBe(2)
+        expect(internals.retirements.get(id)?.attempt).toBeUndefined()
+      })
+      const successorFlush = ctx.sessions.flush(successor)
+      let successorSettled = false
+      void successorFlush.finally(() => { successorSettled = true }).catch(() => {})
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(3) })
+      expect(successorSettled).toBe(false)
+      retryGate.resolve(undefined)
+
+      await expect(successorFlush).resolves.toBe(true)
+      expect(backend.store.get(id)?.events.map(event => event.seq)).toEqual([0, 1, 2])
+    } finally {
+      retryGate.resolve(undefined)
       await backendFiber.dispose()
       await ctx.fiber.dispose()
     }
@@ -1664,6 +2114,70 @@ describe('PersistenceCoordinator retirement', () => {
     } finally {
       await backendFiber.dispose()
       await ctx.fiber.dispose()
+    }
+  })
+
+  it('backend teardown closes with a bounded failure when a queued predecessor cannot retire', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    let coordinator!: PersistenceCoordinator<never>
+    const backendFiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+    const initialGate = Promise.withResolvers<undefined>()
+    backend.beforeAppend = async (attempt) => {
+      if (attempt === 1) {
+        await initialGate.promise
+        throw new Error('initial retirement failure')
+      }
+      throw new Error('shutdown retirement failure')
+    }
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const logged = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+
+    try {
+      const id = SessionId('bounded-queued-shutdown')
+      let first!: Session
+      const firstFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        first = inner.sessions.create(id)
+      }, { inject: ['sessions'] }))
+      first.append('turn/start', { turn: 1 })
+      first.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await firstFiber.dispose()
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+
+      let successor!: Session
+      const successorFiber = await ctx.plugin(Object.assign((inner: Context) => {
+        successor = inner.sessions.create(id, { seed: first.events })
+      }, { inject: ['sessions'] }))
+      await successorFiber.dispose()
+      const internals = coordinator as unknown as CoordinatorInternals
+      expect(internals.retirements.get(id)?.session).toBe(successor)
+
+      initialGate.resolve(undefined)
+      await vi.waitFor(() => {
+        expect(internals.retirementStates.get(first)?.attempt).toBeUndefined()
+      })
+
+      await expect(backendFiber.dispose()).resolves.toBeUndefined()
+      expect(backend.appendAttempts).toBe(2)
+      expect(backend.lifecycle.at(-1)).toBe('close')
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'session-persistence-controlled dispose failed',
+      }))
+    } finally {
+      initialGate.resolve(undefined)
+      try {
+        await backendFiber.dispose()
+      } catch {
+        // The bounded shutdown failure is asserted above.
+      }
+      try {
+        await ctx.fiber.dispose()
+      } catch {
+        // The child teardown failure is asserted through backendFiber.
+      }
     }
   })
 

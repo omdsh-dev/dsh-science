@@ -107,6 +107,7 @@ interface ContextPressureState {
 export const tokenUsageProjectionDefinition:
 ProjectionDefinition<'tokenUsage', TokenUsageState> = {
   key: 'tokenUsage',
+  definitionToken: Symbol('token usage projection definition'),
   schema: projectionSchema,
   init: () => ({ totals: zeroBuckets(), last: null }),
   apply: (state, event) => {
@@ -163,6 +164,7 @@ ProjectionDefinition<'tokenUsage', TokenUsageState> = {
 export const contextPressureProjectionDefinition:
 ProjectionDefinition<'contextPressure', ContextPressureState> = {
   key: 'contextPressure',
+  definitionToken: Symbol('context pressure projection definition'),
   schema: pressureSchema,
   init: () => ({ surfaceTokens: 0 }),
   apply: (state, event) => {

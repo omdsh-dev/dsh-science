@@ -9,7 +9,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
-import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readdir, realpath, link, rm, stat } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -21,7 +22,7 @@ import {
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
   type StoredPrefix,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
   encodeSegment, eventLines, logPath, logSuffix, parseHeaderMeta, projectDir, scanLog, sessionDir,
   SessionLogScanner, toHeaderLine,
@@ -94,6 +95,11 @@ interface FileRevisionIdentity {
   readonly size: bigint
   readonly mtimeNs: bigint
   readonly ctimeNs: bigint
+}
+
+interface SyncedTemporaryFile {
+  readonly path: string
+  readonly handle: FileHandle
 }
 
 /** Build the source-qualified revision shared by full and lightweight reads. */
@@ -195,8 +201,16 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   // JSONL is sequential media: no loadStoredFrom hook, so the coordinator
   // parses the stored prefix (both encodings) and skips forward to fromSeq.
-  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  readFrom(
+    id: SessionId,
+    fromSeq: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: PersistenceRevision }> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  override drain(session: Session): Promise<PersistenceRevision> {
+    return this.coordinator.drain(session)
   }
 
   // One method serves both public `list` and the backend hook; delegating it to
@@ -295,11 +309,17 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   ): Promise<{ buffer: Buffer; revision: PersistenceRevision }> {
     for (;;) {
       signal?.throwIfAborted()
-      const before = fileRevision(await stat(path, { bigint: true }))
-      const buffer = await readFile(path, { signal })
-      signal?.throwIfAborted()
-      const after = fileRevision(await stat(path, { bigint: true }))
-      if (before === after) return { buffer, revision: after }
+      const handle = await open(path, 'r')
+      try {
+        const before = fileRevision(await handle.stat({ bigint: true }))
+        signal?.throwIfAborted()
+        const buffer = await handle.readFile({ signal })
+        signal?.throwIfAborted()
+        const after = fileRevision(await handle.stat({ bigint: true }))
+        if (before === after) return { buffer, revision: after }
+      } finally {
+        await handle.close()
+      }
     }
   }
 
@@ -419,13 +439,16 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /** Durably append a batch, lazily materializing the file when not yet present. */
-  async appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void> {
+  async appendBatch(
+    meta: SessionHeader,
+    events: readonly SessionEvent[],
+    isMaterialized: boolean,
+  ): Promise<PersistenceRevision> {
     await this.ensureRootEncoding()
     if (isMaterialized) {
-      await this.appendLines(meta, events)
-    } else {
-      await this.materialize(meta, events)
+      return this.appendLines(meta, events)
     }
+    return this.materialize(meta, events)
   }
 
   /**
@@ -437,10 +460,9 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     meta: SessionHeader,
     tornMarker: JsonlTornMarker | undefined,
     closers: readonly SessionEvent[],
-  ): Promise<void> {
-    if (tornMarker !== undefined) await this.repair(meta, tornMarker.truncateTo)
+  ): Promise<PersistenceRevision> {
     const repairedEvents = [...(tornMarker?.recoveredEvents ?? []), ...closers]
-    if (repairedEvents.length > 0) await this.appendLines(meta, repairedEvents)
+    return this.repairAndAppend(meta, tornMarker?.truncateTo, repairedEvents)
   }
 
   /** List valid unique stored sessions' metadata (header line only — no full-log parse). */
@@ -448,32 +470,25 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return (await this.listArtifacts(signal)).map(artifact => artifact.header)
   }
 
-  /** List metadata plus a stat-derived identity for each append-only log. */
+  /** List metadata plus the same-handle identity that supplied each header. */
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
-    const snapshots: SessionPersistenceSnapshot[] = []
-    for (const artifact of await this.listArtifacts(signal)) {
-      signal?.throwIfAborted()
-      try {
-        const identity = await stat(artifact.path, { bigint: true })
-        signal?.throwIfAborted()
-        snapshots.push({
-          header: artifact.header,
-          revision: fileRevision(identity),
-        })
-      } catch (error: unknown) {
-        signal?.throwIfAborted()
-        if (!isENOENT(error)) throw error
-      }
-    }
+    const snapshots = (await this.listArtifacts(signal)).map(artifact => ({
+      header: artifact.header,
+      revision: artifact.revision,
+    }))
     signal?.throwIfAborted()
     return snapshots
   }
 
-  private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
+  private async listArtifacts(signal?: AbortSignal): Promise<Array<{
+    header: SessionHeader
+    path: string
+    revision: PersistenceRevision
+  }>> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string }> = []
+    const artifacts: Array<{ header: SessionHeader; path: string; revision: PersistenceRevision }> = []
     const ids = new Set<SessionId>()
     for (const project of await this.listProjectDirs(signal)) {
       signal?.throwIfAborted()
@@ -488,12 +503,19 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         signal?.throwIfAborted()
         if (!pathExists) continue
         // Read only headers so listing scales with session count, not log size.
-        const first = this.compression === 'zstd'
-          ? await this.readFirstZstdLine(path, signal)
-          : await this.readFirstLine(path, signal)
+        let observed: { line: string; revision: PersistenceRevision } | undefined
+        try {
+          observed = this.compression === 'zstd'
+            ? await this.readFirstZstdLine(path, signal)
+            : await this.readFirstLine(path, signal)
+        } catch (error: unknown) {
+          signal?.throwIfAborted()
+          if (isENOENT(error)) continue
+          throw error
+        }
         signal?.throwIfAborted()
-        if (first === undefined) continue // empty/half-written file
-        const meta = parseHeaderMeta(first)
+        if (observed === undefined) continue // empty/half-written file
+        const meta = parseHeaderMeta(observed.line)
         if (meta === undefined) continue // not a session header
         await this.assertStoredIdentity(path, meta, undefined, signal)
         signal?.throwIfAborted()
@@ -501,7 +523,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
           throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
         }
         ids.add(meta.id)
-        artifacts.push({ header: meta, path })
+        artifacts.push({ header: meta, path, revision: observed.revision })
       }
     }
     signal?.throwIfAborted()
@@ -511,7 +533,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   // --- materialization / append / repair (file mechanics) ---
 
   /** Atomically write the header line + first batch (temp-write, fsync, publish). */
-  private async materialize(meta: SessionHeader, events: readonly SessionEvent[]): Promise<void> {
+  private async materialize(meta: SessionHeader, events: readonly SessionEvent[]): Promise<PersistenceRevision> {
     const project = projectDir(this.root, meta.cwd)
     const dir = sessionDir(this.root, meta.cwd, meta.id)
     const finalPath = logPath(this.root, meta.cwd, meta.id, this.compression)
@@ -519,10 +541,9 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const content = await this.encodeMaterialization(meta, events)
     /* v8 ignore next -- native Windows coverage exercises this platform dispatch; Linux covers the POSIX peer */
     if (process.platform === 'win32') {
-      await this.materializeWin32(project, dir, finalPath, meta.id, content)
-    } else {
-      await this.materializePosix(project, dir, finalPath, meta.id, content)
+      return this.materializeWin32(project, dir, finalPath, meta.id, content)
     }
+    return this.materializePosix(project, dir, finalPath, meta.id, content)
   }
 
   /* v8 ignore start -- Windows uses the Win32 durable-publish path; POSIX coverage exercises this peer. */
@@ -532,7 +553,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     finalPath: string,
     id: SessionId,
     content: Buffer | string,
-  ): Promise<void> {
+  ): Promise<PersistenceRevision> {
     await mkdir(this.root, { recursive: true, mode: 0o700 })
     await this.syncDirPosix(dirname(this.root))
     await mkdir(project, { recursive: true, mode: 0o700 })
@@ -540,31 +561,31 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     await mkdir(dir, { recursive: true, mode: 0o700 })
     await this.syncDirPosix(project)
     await this.rejectExistingLog(finalPath, id)
-    const tmp = await this.writeSyncedTempFile(finalPath, content)
+    const temporary = await this.writeSyncedTempFile(finalPath, content)
     // Publish via link()+unlink(), NOT rename(): link fails with EEXIST if the
     // final path already exists, so two processes materializing the same id
     // concurrently cannot clobber each other. rename() would silently overwrite.
     let linked = false
     try {
-      await link(tmp, finalPath)
+      await link(temporary.path, finalPath)
       linked = true
+      // link() succeeded — the log is published. fsync the directory so the new
+      // entry survives a power loss: the new link is not crash-durable until the
+      // parent directory's metadata is synced.
+      await this.syncDirPosix(dir)
+      // Best-effort temp cleanup: the log is already published and durable.
+      try {
+        await rm(temporary.path, { force: true })
+      } catch {
+        /* v8 ignore next -- redundant temp link; publish already durable, rm failure is an unreachable IO edge */
+      }
+      return fileRevision(await temporary.handle.stat({ bigint: true }))
     } finally {
-      // Remove an unpublished temp on failure. After publication, defer cleanup
-      // until the directory entry is durable so cleanup cannot reject a live log.
+      await temporary.handle.close()
+      // Remove an unpublished temp on failure. A linked artifact retains the
+      // exact inode even if another process replaces its pathname meanwhile.
       /* v8 ignore next -- link failure is the TOCTOU/IO race guarded above; not reachable in test */
-      if (!linked) await rm(tmp, { force: true })
-    }
-    // link() succeeded — the log is published. fsync the directory so the new
-    // entry survives a power loss: the new link is not crash-durable until the
-    // parent directory's metadata is synced.
-    await this.syncDirPosix(dir)
-    // Best-effort temp cleanup: the log is already published and durable, so a
-    // failure to remove the (now-redundant) temp hard link must NOT reject the
-    // append. Swallow only the rm failure; nothing else of consequence runs here.
-    try {
-      await rm(tmp, { force: true })
-    } catch {
-      /* v8 ignore next -- redundant temp link; publish already durable, rm failure is an unreachable IO edge */
+      if (!linked) await rm(temporary.path, { force: true })
     }
   }
   /* v8 ignore stop */
@@ -576,17 +597,20 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     finalPath: string,
     id: SessionId,
     content: Buffer | string,
-  ): Promise<void> {
+  ): Promise<PersistenceRevision> {
     await ensureDurableDirectoryWin32(this.root)
     await ensureDurableDirectoryWin32(project)
     await ensureDurableDirectoryWin32(dir)
     await this.rejectExistingLog(finalPath, id)
-    const tmp = await this.writeSyncedTempFile(finalPath, content)
+    const temporary = await this.writeSyncedTempFile(finalPath, content)
     try {
-      await publishNewFileWin32(tmp, finalPath)
+      await publishNewFileWin32(temporary.path, finalPath)
+      return fileRevision(await temporary.handle.stat({ bigint: true }))
     } catch (error) {
-      await rm(tmp, { force: true })
+      await rm(temporary.path, { force: true })
       throw error
+    } finally {
+      await temporary.handle.close()
     }
   }
   /* v8 ignore stop */
@@ -603,16 +627,18 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     }
   }
 
-  private async writeSyncedTempFile(finalPath: string, content: Buffer | string): Promise<string> {
+  private async writeSyncedTempFile(finalPath: string, content: Buffer | string): Promise<SyncedTemporaryFile> {
     const tmp = `${finalPath}.${randomBytes(6).toString('hex')}.tmp`
     const handle = await open(tmp, 'wx', 0o600)
     try {
       await handle.writeFile(content)
       await handle.sync()
-    } finally {
+      return { path: tmp, handle }
+    } catch (error: unknown) {
       await handle.close()
+      await rm(tmp, { force: true })
+      throw error
     }
-    return tmp
   }
 
   /** Encode the header and first batch without combining their frame boundaries. */
@@ -648,17 +674,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * previous size before rethrowing because the unchanged cursor will retry the
    * batch; leaving partial bytes would create duplicate sequence numbers.
    */
-  private async appendLines(meta: SessionHeader, events: readonly SessionEvent[]): Promise<void> {
+  private async appendLines(meta: SessionHeader, events: readonly SessionEvent[]): Promise<PersistenceRevision> {
     const content = await this.encodeEventBatch(events)
     const path = logPath(this.root, meta.cwd, meta.id, this.compression)
     const handle = await open(path, 'a')
-    let closed = false
-    const closeAppendHandle = async (): Promise<void> => {
-      if (closed) return
-      closed = true
-      await handle.close()
-    }
-
     try {
       const { size: before } = await handle.stat()
       try {
@@ -666,35 +685,55 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         await handle.sync()
       } catch (error) {
         try {
-          await closeAppendHandle()
-          await this.rollbackAppend(path, before)
+          await this.rollbackAppend(handle, before)
         } catch (rollbackError) {
           throw new AggregateError([error, rollbackError], `failed to roll back append to "${path}"`)
         }
         throw error
       }
-    } finally {
-      await closeAppendHandle()
-    }
-  }
-
-  private async rollbackAppend(path: string, size: number): Promise<void> {
-    const handle = await open(path, 'r+')
-    try {
-      await handle.truncate(size)
-      await handle.sync()
+      return fileRevision(await handle.stat({ bigint: true }))
     } finally {
       await handle.close()
     }
   }
 
-  /** Truncate the log file to `offset` bytes and fsync (discard the crash tail). */
-  private async repair(meta: SessionHeader, offset: number): Promise<void> {
+  /** Restore one failed append through the exact handle that performed it. */
+  private async rollbackAppend(handle: FileHandle, size: number): Promise<void> {
+    await handle.truncate(size)
+    await handle.sync()
+  }
+
+  /** Repair and append through one exact file handle, returning that inode's final revision. */
+  private async repairAndAppend(
+    meta: SessionHeader,
+    truncateTo: number | undefined,
+    events: readonly SessionEvent[],
+  ): Promise<PersistenceRevision> {
+    const content = events.length === 0 ? undefined : await this.encodeEventBatch(events)
     const path = logPath(this.root, meta.cwd, meta.id, this.compression)
-    await truncate(path, offset)
-    const handle = await open(path, 'r+')
+    const handle = await open(path, 'a+')
     try {
-      await handle.sync()
+      const { size: originalSize } = await handle.stat()
+      const repairedSize = truncateTo ?? originalSize
+      if (truncateTo !== undefined) {
+        await handle.truncate(truncateTo)
+        await handle.sync()
+      }
+      if (content !== undefined) {
+        try {
+          await handle.writeFile(content)
+          await handle.sync()
+        } catch (error: unknown) {
+          try {
+            await handle.truncate(repairedSize)
+            await handle.sync()
+          } catch (rollbackError: unknown) {
+            throw new AggregateError([error, rollbackError], `failed to roll back repair append to "${path}"`)
+          }
+          throw error
+        }
+      }
+      return fileRevision(await handle.stat({ bigint: true }))
     } finally {
       await handle.close()
     }
@@ -707,10 +746,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * file. Returns undefined if the file is empty or has no complete first line.
    * Reads in bounded chunks so a huge log costs only the header read.
    */
-  private async readFirstLine(path: string, signal?: AbortSignal): Promise<string | undefined> {
-    signal?.throwIfAborted()
-    const handle = await open(path, 'r')
-    try {
+  private async readFirstLine(path: string, signal?: AbortSignal): Promise<{
+    line: string
+    revision: PersistenceRevision
+  } | undefined> {
+    return this.readStableHeaderLine(path, async (handle) => {
       signal?.throwIfAborted()
       const chunks: Buffer[] = []
       const buf = Buffer.alloc(8192)
@@ -728,16 +768,15 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         }
         chunks.push(Buffer.from(slice))
       }
-    } finally {
-      await handle.close()
-    }
+    }, signal)
   }
 
   /** Read and validate only the independently compressed header frame. */
-  private async readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined> {
-    signal?.throwIfAborted()
-    const handle = await open(path, 'r')
-    try {
+  private async readFirstZstdLine(path: string, signal?: AbortSignal): Promise<{
+    line: string
+    revision: PersistenceRevision
+  } | undefined> {
+    return this.readStableHeaderLine(path, async (handle) => {
       signal?.throwIfAborted()
       let content = Buffer.alloc(0)
       const chunk = Buffer.alloc(8192)
@@ -765,8 +804,30 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         assertZstdHeaderFrame(plaintext)
         return plaintext.subarray(0, -1).toString('utf8')
       }
-    } finally {
-      await handle.close()
+    }, signal)
+  }
+
+  /** Read one header and its revision from a stable observation of one exact file handle. */
+  private async readStableHeaderLine(
+    path: string,
+    readLine: (handle: FileHandle) => Promise<string | undefined>,
+    signal?: AbortSignal,
+  ): Promise<{ line: string; revision: PersistenceRevision } | undefined> {
+    for (;;) {
+      signal?.throwIfAborted()
+      const handle = await open(path, 'r')
+      try {
+        const before = fileRevision(await handle.stat({ bigint: true }))
+        signal?.throwIfAborted()
+        const line = await readLine(handle)
+        signal?.throwIfAborted()
+        if (line === undefined) return undefined
+        const after = fileRevision(await handle.stat({ bigint: true }))
+        signal?.throwIfAborted()
+        if (before === after) return { line, revision: after }
+      } finally {
+        await handle.close()
+      }
     }
   }
 

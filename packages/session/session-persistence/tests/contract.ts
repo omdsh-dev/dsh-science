@@ -307,10 +307,14 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         const whole = await persistence.readFrom(m.id, 0)
         expect(whole.meta).toMatchObject({ id: m.id, cwd: '/work' })
         expect(whole.events).toEqual(log)
+        const listed = (await persistence.listSnapshots())
+          .find(snapshot => snapshot.header.id === m.id)
+        expect(whole.revision).toBe(listed?.revision)
 
         const suffix = await persistence.readFrom(m.id, 3)
         expect(suffix.events).toEqual(log.slice(3))
         expect(suffix.events[0]?.seq).toBe(3)
+        expect(suffix.revision).toBe(whole.revision)
 
         // At/past the stored end: an empty tail, never an error.
         await expect(persistence.readFrom(m.id, log.length)).resolves.toMatchObject({ events: [] })

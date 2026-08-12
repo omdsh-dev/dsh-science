@@ -44,6 +44,7 @@ const projectionSchema = z.object({
 export const subagentTimingProjectionDefinition:
 ProjectionDefinition<'subagentTiming', TimingState> = {
   key: 'subagentTiming',
+  definitionToken: Symbol('subagent timing projection definition'),
   schema: projectionSchema,
   init: () => ({ descriptorSeen: false, settledMs: 0 }),
   apply: (state, event) => {
@@ -142,6 +143,7 @@ function descriptorIdentity(event: SessionEvent): SubagentIdentityProjection | u
 export const subagentIdentityProjectionDefinition:
 ProjectionDefinition<'subagent', IdentityState> = {
   key: 'subagent',
+  definitionToken: Symbol('subagent identity projection definition'),
   schema: identitySchema,
   init: () => ({}),
   apply: (state, event) => {

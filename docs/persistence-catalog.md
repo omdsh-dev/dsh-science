@@ -650,7 +650,7 @@ Source: [`packages/core/session/src/types.ts:332`](../packages/core/session/src/
 
 Types: [SessionTitleEventData](subsystems/session-title.md)
 
-Source: [`packages/session/session-title/src/index.ts:100`](../packages/session/session-title/src/index.ts)
+Source: [`packages/session/session-title/src/index.ts:102`](../packages/session/session-title/src/index.ts)
 
 #### `session/title-llm-request` — log-only
 

@@ -95,6 +95,8 @@ The session log is the source of the context the model sees. `deriveMessages()` 
 
 **Model-visible means logged.** Anything that reaches a model request must be reconstructable from the log, and a runtime invariant asserts it. This is why a new model-visible input requires a new session event: extend `SessionEventMap` and render from the log.
 
+Durable domain read models follow the same authority boundary. The domain owns one authoritative event fold and derives its public projection from that fold; the generic [session-projection registry](../packages/session/session-projection/README.md) owns live driving, watermarks, cache admission, and notification. A domain may provide a checkpoint-state schema to reject schema-invalid private cache rows, an encoded-watermark extractor to bind provenance-heavy state to its outer row seq, and a public-view change predicate when replay evidence advances without changing the served value. Persisted projection writes wait for the exact Session lifecycle's durable log drain and serialize per session id. Cached state is always a disposable shortcut, never a second source of truth. See the [Science Session domain](subsystems/science.md) for the provenance-heavy strict-fold example.
+
 ## Capability seams
 
 A **seam** is a swappable capability with three roles: a **Service Definition** declaring the interface, a **Service provider** implementing it, and a **Consumer** using it, commonly a model-facing tool. A package may combine roles, but one role alone is not a seam; adding a capability means designing all three ([capability graph](capability-seams.md)).
@@ -120,7 +122,7 @@ New behavior attaches to a documented extension point. Changing the loop itself 
 | Add model-facing context | call `agent.inject()`; it lands in the next admitted request |
 | Add UI or editor integration | drive `ctx.agents` and render from `session/event` |
 | Add a Web Client Chat node | register a `ConversationNodeDefinition` + keyed renderer |
-| Add durable session state | extend `SessionEventMap`; render and replay from the log |
+| Add durable session state | extend `SessionEventMap`; own one strict fold, then register its derived read model on `ctx.sessionProjections` when clients need it |
 | Generate session titles | register the sole `ctx.sessionTitle` provider |
 | Manage a same-session objective | use `ctx.goals`; continue through `agent/*` |
 | Fork a live session | `ctx.sessions.fork(source, boundary?, childSessionId?)` |

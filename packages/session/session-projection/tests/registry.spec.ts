@@ -3,11 +3,11 @@
  * lazy cell build (registration after events, session after registration),
  * the Object.is no-change gate (same reference ⇒ zero change-feed work),
  * snapshot consistency (asOfSeq = last event seq; values from the watermark
- * cache), duplicate-key rejection, stateVersion validation, and effect-tied
- * removal of registrations and change listeners (HMR safety).
+ * cache), same-version shared registration, stateVersion validation, and
+ * effect-tied removal of registrations and change listeners (HMR safety).
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -19,20 +19,28 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     'test/marks': { marks: string[] }
     'test/count': number
+    '__proto__': number
   }
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'test/mark': { marks: string[] }
+    'test/evidence': Record<string, never>
   }
 }
 
 /** Whole-value unit: latest test/mark event wins; unrelated events return the same reference. */
 type MarksState = { marks: string[] } | null
+const marksDefinitionToken = Symbol('test marks definition')
 const marksUnit = (): ProjectionDefinition<'test/marks', MarksState> => ({
   key: 'test/marks',
+  definitionToken: marksDefinitionToken,
   schema: z.object({ marks: z.array(z.string()) }),
+  checkpointStateSchema: z.union([
+    z.object({ marks: z.array(z.string()) }).strict(),
+    z.null(),
+  ]),
   init: () => null,
   apply: (state, event) => (event.type === 'test/mark' ? (event).data : state),
   view: state => state ?? { marks: [] },
@@ -40,12 +48,42 @@ const marksUnit = (): ProjectionDefinition<'test/marks', MarksState> => ({
 })
 
 /** Counting unit over every event — state changes on each apply. */
+const countDefinitionToken = Symbol('test count definition')
 const countUnit = (): ProjectionDefinition<'test/count', number> => ({
   key: 'test/count',
+  definitionToken: countDefinitionToken,
   schema: z.number().int().nonnegative(),
   init: () => 0,
   apply: state => state + 1,
   view: state => state,
+  stateVersion: 1,
+})
+
+const protoDefinitionToken = Symbol('test literal proto definition')
+const protoUnit = (): ProjectionDefinition<'__proto__', number> => ({
+  key: '__proto__',
+  definitionToken: protoDefinitionToken,
+  schema: z.number().int().nonnegative(),
+  init: () => 0,
+  apply: state => state + 1,
+  view: state => state,
+  stateVersion: 1,
+})
+
+/** Unit whose private evidence changes more often than its public count. */
+type EvidenceCountState = { value: number; evidence: number }
+const evidenceCountUnit = (): ProjectionDefinition<'test/count', EvidenceCountState> => ({
+  key: 'test/count',
+  definitionToken: Symbol('test evidence count definition'),
+  schema: z.number().int().nonnegative(),
+  init: () => ({ value: 0, evidence: 0 }),
+  apply: (state, event) => {
+    if (event.type === 'test/evidence') return { ...state, evidence: state.evidence + 1 }
+    if (event.type === 'test/mark') return { ...state, value: event.data.marks.length }
+    return state
+  },
+  view: state => state.value,
+  viewChanged: (previous, next) => previous.value !== next.value,
   stateVersion: 1,
 })
 
@@ -60,6 +98,26 @@ const mark = (session: Session, marks: string[]): SessionEvent =>
   session.append('test/mark', { marks })
 
 describe('SessionProjectionRegistry drive', () => {
+  it('preserves a literal __proto__ key across every public and checkpoint face', async () => {
+    const { ctx, session } = await harness()
+    ctx.sessionProjections.register(protoUnit())
+    mark(session, ['committed'])
+
+    const snapshot = ctx.sessionProjections.snapshot(session)
+    const checkpoint = ctx.sessionProjections.checkpoint(session)
+    const viewed = ctx.sessionProjections.viewCheckpoint(checkpoint)
+    const restored = ctx.sessionProjections.restore(checkpoint, [], session.seq)
+
+    for (const record of [snapshot.values, checkpoint, viewed, restored.snapshot.values, restored.checkpoint]) {
+      expect(Object.prototype.hasOwnProperty.call(record, '__proto__')).toBe(true)
+    }
+    expect(snapshot.values.__proto__).toBe(1)
+    expect(checkpoint.__proto__).toEqual({ ver: 1, seq: 0, val: 1 })
+    expect(viewed.__proto__).toBe(1)
+    expect(restored.snapshot.values.__proto__).toBe(1)
+    expect(restored.checkpoint.__proto__).toEqual({ ver: 1, seq: 0, val: 1 })
+  })
+
   it('drives a registered unit over committed events and snapshots the current value', async () => {
     const { ctx, session } = await harness()
     ctx.sessionProjections.register(marksUnit())
@@ -88,9 +146,9 @@ describe('SessionProjectionRegistry drive', () => {
     expect(snapshot.values['test/marks']).toEqual({ marks: [] })
   })
 
-  it('notifies onChanged with the validated view and the causing seq, and skips same-reference applies', async () => {
+  it('notifies with the validated view and skips same-reference applies even when the predicate returns true', async () => {
     const { ctx, session } = await harness()
-    ctx.sessionProjections.register(marksUnit())
+    ctx.sessionProjections.register({ ...marksUnit(), viewChanged: () => true })
     const seen: { key: string; value: unknown; seq: number; sessionId: string }[] = []
     ctx.sessionProjections.onChanged((changedSession, key, value, seq) => {
       seen.push({ key, value, seq, sessionId: String(changedSession.id) })
@@ -99,6 +157,45 @@ describe('SessionProjectionRegistry drive', () => {
     // Non-matching event: apply returns the same reference — no notification.
     session.append('turn/start', { turn: 1 })
     expect(seen).toEqual([{ key: 'test/marks', value: { marks: ['a'] }, seq: event.seq, sessionId: String(session.id) }])
+  })
+
+  it('contains throwing and rejecting change listeners and continues to later listeners', async () => {
+    const { ctx, session } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const seen: unknown[] = []
+    ctx.sessionProjections.onChanged(() => {
+      throw new Error('broken subscriber')
+    })
+    ctx.sessionProjections.onChanged(async () => {
+      throw new Error('rejected subscriber')
+    })
+    ctx.sessionProjections.onChanged((_changedSession, _key, value) => {
+      seen.push(value)
+    })
+
+    expect(() => mark(session, ['committed'])).not.toThrow()
+    expect(seen).toEqual([{ marks: ['committed'] }])
+    await Promise.resolve()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('onChanged listener failed for "test/marks": Error: broken subscriber'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('onChanged listener failed for "test/marks": Error: rejected subscriber'))
+  })
+
+  it('lets a unit advance private replay state without publishing an unchanged view', async () => {
+    const { ctx, session } = await harness()
+    ctx.sessionProjections.register(evidenceCountUnit())
+    const seen: unknown[] = []
+    ctx.sessionProjections.onChanged((_changedSession, _key, value) => {
+      seen.push(value)
+    })
+
+    session.append('test/evidence', {})
+    expect(seen).toEqual([])
+    expect(ctx.sessionProjections.checkpoint(session)['test/count']?.val)
+      .toEqual({ value: 0, evidence: 1 })
+
+    mark(session, ['visible'])
+    expect(seen).toEqual([1])
   })
 
   it('drives independently per session (cells are per-session watermarks)', async () => {
@@ -131,9 +228,9 @@ describe('SessionProjectionRegistry drive', () => {
     const { ctx, session } = await harness()
     ctx.sessionProjections.register(marksUnit())
 
-    // One definition already serves every session (cells are keyed by
-    // Session), and registrants are per-session now: an agent preset mounts
-    // the same tool package once per agent.
+    // One definition already serves every Session (cells are keyed by
+    // Session), while owners are per agent/fiber: an agent preset may mount
+    // the same package once for each agent.
     expect(() => ctx.sessionProjections.register(marksUnit())).not.toThrow()
     mark(session, ['kept'])
     expect(ctx.sessionProjections.snapshot(session).values['test/marks']).toEqual({ marks: ['kept'] })
@@ -159,11 +256,43 @@ describe('SessionProjectionRegistry drive', () => {
     const { ctx } = await harness()
     ctx.sessionProjections.register(marksUnit())
 
-    // The one incompatibility a runtime comparison can name: the versioned
-    // contract says the cached state shape differs, so the two cannot share
-    // cells. Everything else about a definition is functions.
+    // The versioned private-state contract differs, so even the same
+    // definition family cannot share cells. A different definitionToken is
+    // independently incompatible, as the following regression proves.
     expect(() => ctx.sessionProjections.register({ ...marksUnit(), stateVersion: 9 }))
-      .toThrow(/already registered at stateVersion 1; refusing to share it with stateVersion 9/)
+      .toThrow(/already has an active owner/)
+  })
+
+  it('refuses an active same-version owner with a different definition token', async () => {
+    const { ctx } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+
+    expect(() => ctx.sessionProjections.register({
+      ...marksUnit(),
+      definitionToken: Symbol('different marks definition'),
+    })).toThrow(/only the same definitionToken and stateVersion/)
+  })
+
+  it('rejects global definition tokens', async () => {
+    const { ctx } = await harness()
+    expect(() => ctx.sessionProjections.register({
+      ...marksUnit(),
+      definitionToken: Symbol.for('test marks definition'),
+    })).toThrow(/module-private Symbol/)
+  })
+
+  it('rejects well-known definition tokens', async () => {
+    const { ctx } = await harness()
+    expect(() => ctx.sessionProjections.register({
+      ...marksUnit(),
+      definitionToken: Symbol.iterator,
+    })).toThrow(/module-private Symbol/)
+  })
+
+  it('rejects an empty projection key before it can diverge from the push wire', async () => {
+    const { ctx } = await harness()
+    expect(() => ctx.sessionProjections.register({ ...marksUnit(), key: '' as 'test/marks' }))
+      .toThrow(/key must be a non-empty string/)
   })
 
   it('rejects a non-integer or negative stateVersion at register time', async () => {
@@ -226,7 +355,86 @@ describe('SessionProjectionRegistry drive', () => {
     expect(ctx.sessionProjections.checkpoint(session)['test/marks']?.val).toEqual({ marks: ['a'] })
   })
 
-  it('restoreFloor anchors one below the lowest usable watermark and at 0 for missing or mismatched rows', async () => {
+  it.each([
+    ['Map', new Map([['key', 'value']])],
+    ['Date', new Date(0)],
+  ])('checkpoint rejects a non-JSON %s state at the registry boundary', async (_label, value) => {
+    const { ctx, session } = await harness()
+    ctx.sessionProjections.register({
+      key: 'test/non-json' as never,
+      definitionToken: Symbol('test non-json definition'),
+      schema: { parse: (input: unknown) => input } as never,
+      init: () => value,
+      apply: state => state,
+      view: state => state as never,
+      stateVersion: 1,
+    })
+
+    expect(() => ctx.sessionProjections.checkpoint(session))
+      .toThrow('checkpoint state is not losslessly JSON-serializable')
+    expect(() => ctx.sessionProjections.restore({}, [], 0))
+      .toThrow('checkpoint state is not losslessly JSON-serializable')
+  })
+
+  it('uses checkpoint schemas for admission without allowing read-time state migration', async () => {
+    const transformed = await harness()
+    transformed.ctx.sessionProjections.register({
+      key: 'test/count',
+      definitionToken: Symbol('test transformed count definition'),
+      schema: z.number(),
+      checkpointStateSchema: z.number().transform(value => value + 1),
+      init: () => 0,
+      apply: state => state,
+      view: state => state,
+      stateVersion: 1,
+    })
+    const row = { 'test/count': { ver: 1, seq: -1, val: 2 } }
+    expect(transformed.ctx.sessionProjections.viewCheckpoint(row)).toEqual({})
+    expect(transformed.ctx.sessionProjections.restoreFloor(row)).toBe(0)
+    expect(transformed.ctx.sessionProjections.restore(row, [], 0)).toEqual({
+      snapshot: { asOfSeq: -1, values: { 'test/count': 0 } },
+      checkpoint: { 'test/count': { ver: 1, seq: -1, val: 0 } },
+    })
+
+    const nullable = await harness()
+    nullable.ctx.sessionProjections.register({
+      key: 'test/nullable' as never,
+      definitionToken: Symbol('test nullable definition'),
+      schema: z.null() as never,
+      checkpointStateSchema: z.null().transform(() => null),
+      init: () => null,
+      apply: state => state,
+      view: (state: null) => state as never,
+      stateVersion: 1,
+    })
+    const nullRow = { 'test/nullable': { ver: 1, seq: -1, val: null } }
+    expect(nullable.ctx.sessionProjections.viewCheckpoint(nullRow)).toEqual({ 'test/nullable': null })
+    expect(nullable.ctx.sessionProjections.restore(nullRow, [], 0)).toEqual({
+      snapshot: { asOfSeq: -1, values: { 'test/nullable': null } },
+      checkpoint: { 'test/nullable': { ver: 1, seq: -1, val: null } },
+    })
+
+    const undefinedState = await harness()
+    undefinedState.ctx.sessionProjections.register({
+      key: 'test/undefined' as never,
+      definitionToken: Symbol('test undefined definition'),
+      schema: z.null() as never,
+      checkpointStateSchema: z.null().transform(() => undefined),
+      init: () => null,
+      apply: state => state,
+      view: state => state as never,
+      stateVersion: 1,
+    })
+    const invalid = { 'test/undefined': { ver: 1, seq: -1, val: null } }
+    expect(undefinedState.ctx.sessionProjections.viewCheckpoint(invalid)).toEqual({})
+    expect(undefinedState.ctx.sessionProjections.restoreFloor(invalid)).toBe(0)
+    expect(undefinedState.ctx.sessionProjections.restore(invalid, [], 0)).toEqual({
+      snapshot: { asOfSeq: -1, values: { 'test/undefined': null } },
+      checkpoint: { 'test/undefined': { ver: 1, seq: -1, val: null } },
+    })
+  })
+
+  it('restoreFloor overlaps the lowest usable watermark and returns 0 for missing or mismatched rows', async () => {
     const { ctx } = await harness()
     expect(ctx.sessionProjections.restoreFloor({})).toBeUndefined() // no unit registered
     ctx.sessionProjections.register(marksUnit())
@@ -324,6 +532,28 @@ describe('SessionProjectionRegistry drive', () => {
     expect(ctx.sessionProjections.viewCheckpoint({})).toEqual({})
   })
 
+  it('rejects invalid private checkpoint state at every persisted-state read face', async () => {
+    const { ctx } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+    const invalid = {
+      'test/marks': { ver: 1, seq: 2, val: { marks: [1] } },
+    }
+
+    expect(ctx.sessionProjections.viewCheckpoint(invalid)).toEqual({})
+    expect(ctx.sessionProjections.restoreFloor(invalid)).toBe(0)
+    expect(() => ctx.sessionProjections.restore(invalid, [
+      { type: 'turn/end', seq: 2, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ], 2)).toThrow(/state-invalid/)
+
+    const full: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
+      { type: 'test/mark', seq: 1, time: 1, data: { marks: ['rebuilt'] } },
+    ]
+    const restored = ctx.sessionProjections.restore(invalid, full, 0)
+    expect(restored.snapshot.values['test/marks']).toEqual({ marks: ['rebuilt'] })
+    expect(restored.checkpoint['test/marks']?.val).toEqual({ marks: ['rebuilt'] })
+  })
+
   it('restore rejects a row claiming events past the supplied log end (shrunk log ⇒ re-read)', async () => {
     const { ctx } = await harness()
     ctx.sessionProjections.register(countUnit())
@@ -352,6 +582,7 @@ describe('SessionProjectionRegistry drive', () => {
     const { ctx, session } = await harness()
     ctx.sessionProjections.register({
       key: 'test/marks',
+      definitionToken: Symbol('test async-view definition'),
       schema: z.object({ marks: z.array(z.string()) }),
       init: () => null as MarksState,
       apply: state => state,

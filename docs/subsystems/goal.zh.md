@@ -247,7 +247,7 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 
 Types: [Agent](core.md)
 
-Source: [`packages/goal/goal/src/index.ts:183`](../../packages/goal/goal/src/index.ts)
+Source: [`packages/goal/goal/src/index.ts:185`](../../packages/goal/goal/src/index.ts)
 
 <a id="goal-events"></a>
 

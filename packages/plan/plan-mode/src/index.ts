@@ -154,6 +154,8 @@ const planProjectionSchema: ZodType<PlanProjection> = zod.object({
   pending: zod.boolean(),
 })
 
+const planProjectionDefinitionToken = Symbol('plan projection definition')
+
 /** Whether the log holds an opened turn without its closing `turn/end`. */
 function hasOpenTurn(events: readonly SessionEvent[]): boolean {
   let open = false
@@ -244,6 +246,7 @@ export class PlanModeController extends Service {
     ctx.inject(['sessionProjections'], (projectionCtx) => {
       projectionCtx.sessionProjections.register<'plan', PlanUnitState>({
         key: 'plan',
+        definitionToken: planProjectionDefinitionToken,
         schema: planProjectionSchema,
         init: () => ({ active: false, wanted: null }),
         apply: (state, event) => {

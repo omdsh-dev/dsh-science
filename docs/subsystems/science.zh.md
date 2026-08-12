@@ -6,7 +6,7 @@ Science Session Domain 负责精简、读取时必需的事实及其确定性 pr
 
 ## 标识与适用性
 
-`ScienceRunId`、`ScienceEnvironmentProfileId`、`ScienceChartId` 与 `ScienceScratchKey` 是[品牌化标识](core.md#branded-ids)。只有 `SessionHeader.agentPreset` 为 `science` 时，Session 才能包含 Science 事件。唯一一次 mode binding 前，projection 为 `null`；缺少 `science` key 表示没有组合该包。
+`ScienceRunId`、`ScienceEnvironmentProfileId`、`ScienceChartId` 与 `ScienceScratchKey` 是[品牌化标识](core.md#branded-ids)。纯 applicability policy 只在 `SessionHeader.agentPreset` 为 `science` 时准入 Science 事件，并要求 Science preset Session 在 host activity 前绑定 mode；invariant 负责这个 Session container 边界。唯一一次 mode binding 前，projection 为 `null`；缺少 `science` key 表示没有组合该包。
 
 mode 事件只记录稳定模式事实，且必须早于第一条 step、request header 或 tool call。run、chart 与 Outcome 记录向后引用拥有 prompt 与模型 provenance 的最新 mode 后 `request/header`，并引用一项唯一且尚未结算、用于锚定模型操作的 tool call。result 或所属 `step/end` 会结算 call；Python 与 R run、chart、Outcome 分别要求 `run_python` 或 `run_r`、`save_chart`、`publish_outcome`。
 
@@ -24,7 +24,7 @@ interface ScienceModeRef {
 
 ## 环境事实
 
-environment revision 是正数且连续。第一次 run 要求最新 revision 为 `applied`；后续 `invalid` 或 `drifted` observation 会阻止新 run，而第一次 run 后不能再以新的 applied revision 替换环境。每个可选 interpreter binding 保留 canonical identity 与 fingerprint 事实，不保存 package inventory 或 credential。
+environment revision 是正数且连续。第一次 run 要求最新 revision 为 `applied`；后续 `invalid` 或 `drifted` observation 会阻止新 run，而第一次 run 后不能再以新的 applied revision 替换环境。`available` interpreter binding 保留完整 canonical identity 与 fingerprint；失败 capability record 必须携带 reason，且只保留失败前实际观测到的事实，因此 executable 不存在时无需伪造 sentinel。absolute path 字段接受 POSIX、Windows drive 与 Windows UNC 语法，但 Phase 1 不执行任何解释器。
 
 ```ts type-equiv
 /** Whole-value environment binding recorded at one monotonic revision. */
@@ -50,7 +50,7 @@ interface ScienceEnvironmentBinding {
 
 ## Run、图表与 Outcome
 
-run start 是完整且不可变的 execution identity。finish 重复这些字段并增加一个终态。`interrupted` 永远不是 finish payload：只有 `session/end-seed` 关闭仍为 running 的记录时，回放才会派生它。chart version 引用成功 run 与不可变 PNG attachment。Outcome revision 引用先前 run、chart version 或 message，不读取也不修改 Goal 状态。每项 tool call 只授权一个 Science fact，payload timestamp 也不得早于其 supporting fact。公开 projection 保持仅含元数据；私有 checkpoint 保存稀疏、脱敏的见证，且只有严格回放能完全复现该值时才接受恢复值。
+run start 是完整且不可变的 execution identity。finish 重复这些字段并增加一个终态。`interrupted` 永远不是 finish payload：只有 `session/end-seed` 关闭仍为 running 的记录时，回放才会派生它。chart version 引用成功 run 与不可变 PNG attachment。Outcome revision 引用先前成功 run、chart version 或 message，不读取也不修改 Goal 状态。每项 tool call 只授权一个 Science fact，payload timestamp 必须落在 supporting fact 到所属 event envelope time 的区间内。公开 projection 保持仅含元数据。
 
 ```ts type-equiv
 /** Run state served by the Science projection. */
@@ -67,7 +67,9 @@ type ScienceEvidenceRef =
 
 ## Projection 与校验
 
-严格 fold 拒绝格式错误的 payload、不连续的事件与 revision、非法 lifecycle transition，以及缺失或前向引用。invariant 会在 `Session.append()` commit 前暂存该 fold。fail-soft projection 复用严格 payload decoder，忽略已被 invariant 拒绝的非法事件，并对无关事件返回同一 reference。live 与 cold fold 消费同一份完整 Session log，包括继承的 evidence 与 `session/end-seed`。
+严格 fold 拒绝格式错误的 payload、不连续的事件与 revision、非法 lifecycle transition，以及缺失或前向引用。它是 Science 事件流 transition 与 provenance 的唯一权威。Session header metadata 不在事件流中，因此由正交的 applicability policy 负责；invariant 会在 `Session.append()` commit 前组合该 policy 与 fold。`replayScience(events)` 假定事件流已经准入。fail-soft live projection 会推进同一 accumulator 的编码副本，而不维护独立 reducer 或重复 provenance rule。每条 committed event 都会推进私有 watermark；unrelated 或 malformed event 保持 fold 与 witness 不变，也不通知公开读取方。对已准入的 log，live 与 cold path 都消费继承的 evidence 与 `session/end-seed`，并派生相同的公开值。
+
+私有 projection state 是纯 JSON `{ observedSeq, fold, witness }`。空 watermark 为 `-1`；每条 committed event 都会推进它，稀疏、脱敏的 witness 则只保留 strict replay 所需的 supporting fact。使用 `stateVersion: 2` 的 registration 向 generic registry 提供 `checkpointStateSchema`；该 schema 会校验 watermark、严格回放 witness，只有精确复现编码后的 fold 才接纳持久 row。纯 `checkpointStateSeq` extractor 还要求嵌入 watermark 与 row 外层 `seq` 相等。schema 准入只用于不受信任的 checkpoint；extractor 也会校验即将写出的 row，因此持久化两侧都遵守同一条“内嵌水位等于外层 seq”关系。私有 state 可以在公开 projection 不变时变化，因此 `viewChanged` 会抑制重复 notification。公开 schema 校验自身 JSON 字段与派生 metrics，不校验历史 provenance transition。
 
 ```ts type-equiv
 /** Client-safe replay projection for a Science-bound session. */
@@ -89,4 +91,6 @@ interface ScienceProjection {
 }
 ```
 
-Phase 1 有意不提供 public mutation service、interpreter probe、process execution、tool、prompt 或 UI。后续阶段的 producer 只能在外部事实到达规定的 commit point 后，追加六种 typed event 之一。
+package root 只公开消费方所需的 durable identifier、event type、严格 decoder 与 replay result。mutable fold state、transition、witness construction、checkpoint validation 与 projection-state operation 保持内部可见。incremental apply 避免每条 live event 都执行 full-witness replay，但 immutable collection copy 与 witness retention 仍会随历史增长；实现不主张 constant-time，paging 或 compaction 要等测量结果证明需要时再引入。
+
+Phase 1 有意不提供 public mutation service、interpreter probe、process execution、Conda operation、Python 或 R execution、tool、prompt 或 UI。它的 generic infrastructure 变更严格位于 projection 与 persistence seam，以及传播这些契约所必需的 carrier signature：canonical private-state admission 与 state-to-row watermark binding、detached JSON value、显式 definition ownership、public-change suppression、durable lifecycle drain ordering、per-session operation serialization，以及 source-qualified log-revision identity。后续阶段的 producer 只能在外部事实到达规定的 commit point 后，追加六种 typed event 之一。

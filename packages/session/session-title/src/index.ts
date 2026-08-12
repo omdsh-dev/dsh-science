@@ -27,6 +27,8 @@ export { fallbackSessionTitle, normalizeSessionTitle, truncateTitleUtf8 } from '
 /** Identifies one session-title provider registration. */
 export type SessionTitleProviderId = Branded<'SessionTitleProviderId'>
 
+const titleProjectionDefinitionToken = Symbol('title projection definition')
+
 /**
  * Brand a raw provider id.
  * @param id - stable non-empty provider identifier supplied by a plugin.
@@ -308,6 +310,7 @@ export class SessionTitleService extends Service {
     ctx.inject(['sessionProjections'], (projectionCtx) => {
       projectionCtx.sessionProjections.register<'title', string | null>({
         key: 'title',
+        definitionToken: titleProjectionDefinitionToken,
         schema: zod.union([zod.string().min(1), zod.null()]),
         init: () => null,
         apply: (state, event) => (event.type === 'session/title' ? event.data.title : state),

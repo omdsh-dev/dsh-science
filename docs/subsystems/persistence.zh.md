@@ -4,11 +4,11 @@
 
 事件日志的**持久性 seam**。[session.md](session.md) 描述了内存中的 `Session`：仅追加的 `SessionEvent` 日志即为真源。本页描述如何使该日志持久化：抽象的 `SessionPersistence` 服务、它的后端、flush 检查点、崩溃恢复，以及随日志一同存储的元数据头。日志承载的事件词汇在生成的[持久化日志事件目录](../persistence-catalog.md)中逐项列举。
 
-该 seam 是一个[能力 seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md)：一个抽象服务（[dsh-session-persistence](../../packages/session/session-persistence)，`ctx.sessionPersistence`）在现有 `SessionEvent` 上定义 locate/create/append、可复用的 Session 准备流程、逻辑 load/inspect、物理后缀读取，以及轻量的 list/snapshot 观察——**没有平行的持久化事件类型**——以及两个实现同一约定的可互换后端。见 [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md)。
+该 seam 是一个[能力 seam](../../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md)：一个抽象服务（[dsh-session-persistence](../../packages/session/session-persistence)，`ctx.sessionPersistence`）在现有 `SessionEvent` 上定义 locate/create/append、可复用的 Session 准备流程、逻辑 load/inspect、物理后缀读取、精确生命周期持久性 drain，以及轻量的 list/snapshot 观察——**没有平行的持久化事件类型**——以及两个实现同一约定的可互换后端。见 [session-persistence Agent Note](../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md)。
 
 ## flush 检查点
 
-`session/event` 是一个*同步*通知；持久化插件会将事件复制到逐会话控制器，而不阻塞生产方。第一个待处理事件会开启固定批处理窗口，后续事件会加入但不会重置截止时间。窗口到期后会启动一个持久化批次；该次写入期间接纳的事件会获得自己的截止时间，并形成后续批次。`session/flush` 会取消等待并排空至完全停稳，因此循环仍将其用作在领取下一个普通轮次之前的顺序与错误观察检查点。后台写入被拒绝时会保留对应事件并暂停自动重试；新事件会开启新的固定窗口，而显式 flush 会立即重试，并通过 `agent/error` 和 logger 报告失败，绝不会把失败记录成已关闭轮次之后的会话事件。dispose（资源释放）会执行同样的最终排空。配置的最大值只限制有意的批处理等待，不限制事件循环调度或后端完成持久化的延迟（[决策](../../.agents/notes/implemented/architecture/2026-08-08-bounded-session-persistence-write-batching.md)）。
+`session/event` 是一个*同步*通知；持久化插件会将事件复制到逐会话控制器，而不阻塞生产方。第一个待处理事件会开启固定批处理窗口，后续事件会加入但不会重置截止时间。窗口到期后会启动一个持久化批次；该次写入期间接纳的事件会获得自己的截止时间，并形成后续批次。`session/flush` 会取消等待并排空至完全停稳，因此循环仍将其用作在领取下一个普通轮次之前的顺序与错误观察检查点。后台写入被拒绝时会保留对应事件并暂停自动重试；新事件会开启新的固定窗口，而显式 flush 会立即重试，并通过 `agent/error` 和 logger 报告失败，绝不会把失败记录成已关闭轮次之后的会话事件。dispose（资源释放）会执行同样的最终排空。`SessionPersistence.drain(session)` 向派生状态写入方暴露该屏障，并在 store detach 后继续跟随精确生命周期的 retirement。配置的最大值只限制有意的批处理等待，不限制事件循环调度或后端完成持久化的延迟（[决策](../../.agents/notes/implemented/architecture/2026-08-08-bounded-session-persistence-write-batching.md)）。
 
 ## 崩溃恢复保留被中断的轮次
 
@@ -206,7 +206,7 @@ interface SessionInspection {
 
 ## 轻量源修订号
 
-派生状态的消费方会在加载完整事件日志之前比较一个低开销的不透明修订号。其表示由持久化后端拥有，并随 append 或会修改数据的 load 修复以事务方式改变；调用方仅比较修订号是否相等。
+派生状态的消费方会在加载完整事件日志之前比较一个低开销的不透明修订号。其表示由持久化后端拥有，调用方只比较是否相等。读取返回的 revision 来自提供 header 与事件的同一句柄或读事务；写入返回的 revision 来自提交该写入的同一句柄或事务。这样即使路径或同 id 生命周期被替换，也不会把一份日志的派生状态绑定到另一份日志的 revision。
 
 ```ts type-equiv
 /**
@@ -220,15 +220,15 @@ type SessionPersistenceRevision = Branded<'SessionPersistenceRevision'>
 /** Lightweight immutable source identity returned without loading a full log. */
 interface SessionPersistenceSnapshot {
   /** Detached metadata for one materialized session. */
-  header: SessionHeader
+  readonly header: SessionHeader
   /** Opaque source-qualified token that changes whenever this stored log changes. */
-  revision: SessionPersistenceRevision
+  readonly revision: SessionPersistenceRevision
 }
 ```
 
 ## 后端
 
-两者都实现同一个抽象 `SessionPersistence`（在 `SessionEvent` 上执行 locate/create/append/prepare/load/inspect/readFrom/list/listSnapshots，观察方法可选支持取消），并通过共享的 `runPersistenceContract` 套件：
+两者都实现同一个抽象 `SessionPersistence`（在 `SessionEvent` 上执行 locate/create/append/prepare/load/inspect/readFrom/drain/list/listSnapshots，观察方法可选支持取消），并通过共享的 `runPersistenceContract` 套件：
 
 - **[dsh-session-persistence-jsonl](../../packages/session/session-persistence-jsonl)**——每个会话一份仅追加的逻辑 JSONL 日志，默认存储为带 checksum 的连续 Zstandard frame，也可配置为原始行；支持崩溃安全的原子写入、被中断轮次的恢复以及读取/回放路径。
 - **[dsh-session-persistence-sqlite](../../packages/session/session-persistence-sqlite)**：基于 `node:sqlite`，每个 `SessionEvent` 一行。行字段 `(session_id, seq, type, time, data, source_event_seqs, surface_op)` 与事件 1:1 映射（包含可选的 surface 元数据），因此没有需要保持同步的并行持久化 schema。
@@ -353,9 +353,23 @@ abstract inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection
  * @param id - the persisted session to read.
  * @param fromSeq - first event seq to include; a non-negative safe integer.
  * @param signal - optional cancellation for queued and backend read work.
- * @returns the header and the stored events with `seq >= fromSeq`.
+ * @returns the header and stored events with `seq >= fromSeq`, plus the
+ * source-qualified revision of that same physical read cut.
  */
-abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }>
+
+/**
+ * Wait until every event admitted for one exact Session lifecycle is durable.
+ * Unlike `ctx.sessions.flush(session)`, this remains valid after the Session
+ * has detached from its store and therefore covers the disposal-retirement
+ * drain. Consumers that persist derived state at detach use this as their
+ * ordering barrier. Implementations that do not track live Session
+ * lifecycles reject instead of claiming durability they cannot establish.
+ * @param session - the live or just-detached lifecycle to drain.
+ * @returns the source-qualified revision observed after that lifecycle's
+ * admitted events are durable.
+ */
+drain(session: Session): Promise<SessionPersistenceRevision>
 
 /**
  * Lightweight listing from metadata, without a full-log parse.
@@ -377,7 +391,7 @@ abstract list(signal?: AbortSignal): Promise<SessionHeader[]>
 abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
 ```
 
-Types: [SessionEvent](session.md) · [SessionId](core.md)
+Types: [Session](session.md) · [SessionEvent](session.md) · [SessionId](core.md)
 
 Source: [`packages/session/session-persistence/src/index.ts:84`](../../packages/session/session-persistence/src/index.ts)
 <!-- END GENERATED cordis-surface -->

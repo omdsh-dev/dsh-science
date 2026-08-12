@@ -112,6 +112,8 @@ export interface StoredPrefix<TornMarker = unknown> {
 export interface StoredSuffix {
   meta: SessionHeader
   events: SessionEvent[]
+  /** Revision observed for exactly this detached suffix read. */
+  revision: SessionPersistenceRevision
 }
 
 /**
@@ -179,18 +181,28 @@ export interface PersistenceBackend<TornMarker = unknown> {
    * Durably append a CONTIGUOUS batch, lazily materializing the session first
    * when `!isMaterialized`. The materialize-write and the first event batch MUST
    * commit ATOMICALLY (a crash between them must not leave a materialized-but-
-   * empty session). Returns once the batch is durable.
+   * empty session). The returned revision must identify the exact committed
+   * target of this write, without reopening or resolving the session by id.
    */
-  appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
+  appendBatch(
+    meta: SessionHeader,
+    events: readonly SessionEvent[],
+    isMaterialized: boolean,
+  ): Promise<SessionPersistenceRevision>
 
   /**
    * Make a crash repair durable: truncate the torn tail (iff
    * `tornMarker !== undefined`) and append `closers` (iff any). NOT required to
    * be atomic — a file backend may truncate-then-append in two fsync'd steps.
    * Used by load (truncate + synthetic closers) and by live-adoption (truncate
-   * only, `closers = []`).
+   * only, `closers = []`). The returned revision identifies the exact target
+   * after repair and must be observed through the same transaction or handle.
    */
-  commitRepair(meta: SessionHeader, tornMarker: TornMarker | undefined, closers: readonly SessionEvent[]): Promise<void>
+  commitRepair(
+    meta: SessionHeader,
+    tornMarker: TornMarker | undefined,
+    closers: readonly SessionEvent[],
+  ): Promise<SessionPersistenceRevision>
 
   /**
    * List all stored (materialized) sessions' metadata.
@@ -225,6 +237,8 @@ interface SessionState {
    * distinguish an unused id from a persisted collision.
    */
   materialized: boolean
+  /** Exact revision returned by the latest read or write of this state. */
+  revision?: SessionPersistenceRevision
   /**
    * The live Session this state was bound to via `onCreated`, if any. State
    * created through the public `create()`/`load()` API has no owner; state bound
@@ -238,7 +252,21 @@ interface SessionState {
 interface LiveSessionState {
   init: Promise<void>
   writes: SessionWriteBehind
+  pendingRetirement?: RetirementState
 }
+
+/** One detached lifecycle's durable-completion latch and current attempt. */
+interface RetirementState {
+  readonly session: Session
+  readonly completion: PromiseWithResolvers<SessionPersistenceRevision | undefined>
+  readonly predecessorState?: RetirementState
+  readonly predecessor: Promise<void>
+  attempt: Promise<SessionPersistenceRevision | undefined> | undefined
+  completed: boolean
+}
+
+/** Sentinel returned when a retirement appeared before a serialized cold read began. */
+const RETIREMENT_RETRY = Symbol('retirement retry')
 
 /** One validated cold source and the exact unpublished Session built from it. */
 interface PreparedSessionSource<TornMarker> {
@@ -590,8 +618,12 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private states = new Map<SessionId, SessionState>()
   /** Lifecycle and write-behind state keyed by the exact live Session. */
   private live = new Map<Session, LiveSessionState>()
-  /** Exact disposed lifecycles whose buffered tail is still draining. */
-  private retirements = new Map<SessionId, Promise<void>>()
+  /** Detached lifecycle that must complete before this id can be reused or read cold. */
+  private retirements = new Map<SessionId, RetirementState>()
+  /** Persistent retirement state keyed by exact lifecycle, including failed attempts. */
+  private retirementStates = new WeakMap<Session, RetirementState>()
+  /** Final drains retained by exact Session identity after id-level retirement cleanup. */
+  private lifecycleRetirements = new WeakMap<Session, Promise<SessionPersistenceRevision | undefined>>()
   /** Shared cold reads, unpublished reservations, and completed LRU entries. */
   private readonly preparations: SessionPreparations<PreparedSessionSource<TornMarker>, SessionState>
   /**
@@ -701,11 +733,12 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       }
     }
 
-    await this.backend.appendBatch(state.meta, events, state.materialized)
+    const revision = await this.backend.appendBatch(state.meta, events, state.materialized)
     // The durable write is the transaction: mark materialized + advance the
     // cursor as soon as it commits (uniform across backends).
     state.materialized = true
     state.cursor += events.length
+    state.revision = revision
     this.preparations.invalidate(id)
   }
 
@@ -827,22 +860,78 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    * @param id - persisted session to read.
    * @param fromSeq - first event seq to include; a non-negative safe integer.
    * @param signal - optional cancellation for queued and backend read work.
-   * @returns stored header and the valid stored events with `seq >= fromSeq`.
+   * @returns stored header, valid events with `seq >= fromSeq`, and the
+   * source-qualified revision of that same physical read cut.
    */
-  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async readFrom(
+    id: SessionId,
+    fromSeq: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }> {
     if (!Number.isSafeInteger(fromSeq) || fromSeq < 0) {
-      return Promise.reject(new TypeError(`readFrom fromSeq must be a non-negative safe integer, got ${String(fromSeq)}`))
+      throw new TypeError(`readFrom fromSeq must be a non-negative safe integer, got ${String(fromSeq)}`)
     }
-    const retired = Promise.resolve(this.retirements.get(id))
-    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
-    return waited.then(() => this.serialize(id, () => this.readFromCore(id, fromSeq, signal), signal))
+    for (;;) {
+      await this.waitForRetirement(id, signal)
+      const read = await this.serialize(id, async () => this.retirements.has(id)
+        ? RETIREMENT_RETRY
+        : this.readFromCore(id, fromSeq, signal), signal)
+      if (read !== RETIREMENT_RETRY) return read
+    }
+  }
+
+  /**
+   * Wait for one exact live or retiring Session's buffered writes to become durable.
+   * @param session - the tracked lifecycle whose persistence drain must settle.
+   * @returns the source-qualified revision observed after its admitted events are durable.
+   */
+  async drain(session: Session): Promise<SessionPersistenceRevision> {
+    const retirementState = this.retirementStates.get(session)
+    if (retirementState !== undefined && !retirementState.completed) {
+      await this.settleRetirement(retirementState)
+    }
+    const retirement = this.lifecycleRetirements.get(session)
+    if (retirement !== undefined) {
+      const revision = await retirement
+      if (revision === undefined) {
+        throw new Error(`session "${session.id}" has no durable log revision`)
+      }
+      return revision
+    }
+    if (!this.live.has(session)) {
+      throw new Error(`session "${session.id}" lifecycle is not tracked by this persistence backend`)
+    }
+    // A detached lifecycle whose automatic retirement failed keeps its
+    // controller for retry. Re-enter the full retirement path so success also
+    // releases live/state ownership, rather than merely flushing the bytes.
+    if (this.ctx.sessions.get(session.id) !== session) {
+      const retry = this.startRetirement(session)
+      const revision = await retry
+      if (revision === undefined) {
+        throw new Error(`session "${session.id}" has no durable log revision`)
+      }
+      return revision
+    }
+    const flushedRevision = await this.flush(session)
+    const racingRetirement = this.lifecycleRetirements.get(session)
+    if (racingRetirement !== undefined) {
+      const revision = await racingRetirement
+      if (revision === undefined) {
+        throw new Error(`session "${session.id}" has no durable log revision`)
+      }
+      return revision
+    }
+    if (flushedRevision === undefined) {
+      throw new Error(`session "${session.id}" has no durable log revision`)
+    }
+    return flushedRevision
   }
 
   private async readFromCore(
     id: SessionId,
     fromSeq: number,
     signal?: AbortSignal,
-  ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }> {
     signal?.throwIfAborted()
     if (this.backend.loadStoredFrom !== undefined) {
       let suffix: StoredSuffix | undefined
@@ -858,22 +947,26 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       this.assertVersion(suffix.meta)
       if (suffix.events.some(needsLegacyPrefix)) {
         const whole = await this.readStoredPrefix(id, signal)
-        return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
+        return {
+          meta: whole.meta,
+          events: whole.events.filter(event => event.seq >= fromSeq),
+          revision: whole.revision,
+        }
       }
       const events = snapshotStoredEvents(suffix.events, id)
       this.assertEventsSupported(suffix.meta, events)
-      return { meta: structuredClone(suffix.meta), events }
+      return { meta: structuredClone(suffix.meta), events, revision: suffix.revision }
     }
     const whole = await this.readStoredPrefix(id, signal)
     // Sequential fallback: contiguous seqs from 0 make the suffix an index slice.
-    return { meta: whole.meta, events: whole.events.slice(fromSeq) }
+    return { meta: whole.meta, events: whole.events.slice(fromSeq), revision: whole.revision }
   }
 
   /** Read one detached physical prefix without logical recovery or caching. */
   private async readStoredPrefix(
     id: SessionId,
     signal?: AbortSignal,
-  ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; revision: SessionPersistenceRevision }> {
     signal?.throwIfAborted()
     const stored = await this.backend.loadStored(id, signal)
     signal?.throwIfAborted()
@@ -885,6 +978,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     return {
       meta: structuredClone(stored.meta),
       events,
+      revision: stored.revision,
     }
   }
 
@@ -955,6 +1049,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     state.meta = source.inspection.meta
     state.cursor = cursor
     state.materialized = true
+    state.revision = source.revision
     this.states.set(id, state)
     return {
       source,
@@ -989,12 +1084,28 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     return Object.freeze({ meta: session.header, events: session.events })
   }
 
-  /** Await one retiring lifecycle with caller cancellation. */
-  private waitForRetirement(id: SessionId, signal?: AbortSignal): Promise<void> {
-    const retired = Promise.resolve(this.retirements.get(id))
-    return signal === undefined
-      ? retired
-      : observeQueuedAbort(retired, signal, () => false)
+  /** Await every lifecycle currently queued to retire under one id. */
+  private async waitForRetirement(id: SessionId, signal?: AbortSignal): Promise<void> {
+    for (;;) {
+      signal?.throwIfAborted()
+      const state = this.retirements.get(id)
+      if (state === undefined) return
+      await this.settleRetirement(state, signal)
+    }
+  }
+
+  /** Progress one captured retirement and every unfinished predecessor. */
+  private async settleRetirement(state: RetirementState, signal?: AbortSignal): Promise<void> {
+    if (state.completed) return
+    if (state.predecessorState !== undefined) {
+      await this.settleRetirement(state.predecessorState, signal)
+    }
+    const attempt = state.attempt ?? this.startRetirement(state.session)
+    if (signal === undefined) {
+      await attempt
+    } else {
+      await observeQueuedAbort(attempt, signal, () => false)
+    }
   }
 
   // Listing is a direct backend read and needs no coordinator state.
@@ -1092,7 +1203,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     ctx.effect(() => async () => {
       let disposeError: unknown
       try {
-        const errors = await settledErrors([...this.live.keys()].map(session => this.flush(session)))
+        const errors = await this.drainForDispose()
         while (this.chains.size > 0) await Promise.allSettled([...this.chains.values()])
         if (errors.length > 0) {
           throw new AggregateError(errors, `${this.backend.name} dispose failed`)
@@ -1126,7 +1237,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     })
 
     // Callers use flush as the immediate durability barrier for buffered writes.
-    ctx.on('session/flush', session => this.flush(session))
+    ctx.on('session/flush', async (session) => { await this.flush(session) })
 
     // Session disposal is observe-only, so retirement contains its own failure.
     ctx.on('session/disposed', (session) => { this.retire(session) })
@@ -1136,27 +1247,89 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     for (const session of ctx.sessions.list()) void this.initFor(session)
   }
 
+  /**
+   * Drain lifecycles in creation order within each id while allowing unrelated
+   * ids to settle in parallel. A failed predecessor ends that id's shutdown
+   * sequence because its normal-mode completion latch deliberately remains
+   * pending for a later retry; teardown has no later retry after backend close.
+   */
+  private async drainForDispose(): Promise<unknown[]> {
+    const byId = new Map<SessionId, Session[]>()
+    for (const [session, live] of this.live) {
+      live.writes.cancelAutomaticWait()
+      const sessions = byId.get(session.id) ?? []
+      sessions.push(session)
+      byId.set(session.id, sessions)
+    }
+    return settledErrors([...byId.values()].map(async (sessions) => {
+      for (const session of sessions) {
+        if (this.ctx.sessions.get(session.id) === session) {
+          await this.flush(session)
+        } else {
+          await this.startRetirement(session)
+        }
+      }
+    }))
+  }
+
   /** Start and observe one disposed session's final drain. */
   private retire(session: Session): void {
     if (!this.live.has(session)) return
-    const retirement = this.retireCore(session)
-    this.retirements.set(session.id, retirement)
-    const forget = (): void => {
-      if (this.retirements.get(session.id) === retirement) this.retirements.delete(session.id)
+    void this.startRetirement(session)
+  }
+
+  /**
+   * Start or retry one retirement while retaining an id-level completion latch
+   * across failed attempts. New lifecycle initialization and cold reads wait on
+   * that latch until the exact detached owner finishes successfully.
+   */
+  private startRetirement(
+    session: Session,
+  ): Promise<SessionPersistenceRevision | undefined> {
+    const id = session.id
+    let state = this.retirementStates.get(session)
+    if (state === undefined) {
+      const predecessorState = this.retirements.get(id)
+      const predecessor = predecessorState?.completion.promise.then(() => {}) ?? Promise.resolve()
+      state = {
+        session,
+        completion: Promise.withResolvers<SessionPersistenceRevision | undefined>(),
+        ...(predecessorState === undefined ? {} : { predecessorState }),
+        predecessor,
+        attempt: undefined,
+        completed: false,
+      }
+      this.retirementStates.set(session, state)
+      // The id index always names the newest queued lifecycle. Exact older
+      // states remain retryable through retirementStates.
+      this.retirements.set(id, state)
     }
-    void retirement.then(forget, forget)
-    void retirement.catch((error: unknown) => {
-      this.ctx.logger.warn(`${this.backend.name}: session "${session.id}" retirement failed: ${String(error)}`)
+    if (state.attempt !== undefined) return state.attempt
+    const retirement = state.predecessor.then(() => this.retireCore(session))
+    state.attempt = retirement
+    this.lifecycleRetirements.set(session, retirement)
+    void retirement.then((revision) => {
+      state.completed = true
+      if (this.retirements.get(id) === state) this.retirements.delete(id)
+      state.completion.resolve(revision)
+    }, (error: unknown) => {
+      if (state.attempt === retirement) state.attempt = undefined
+      if (this.lifecycleRetirements.get(session) === retirement) {
+        this.lifecycleRetirements.delete(session)
+      }
+      this.ctx.logger.warn(`${this.backend.name}: session "${id}" retirement failed: ${String(error)}`)
     })
+    return retirement
   }
 
   /** Drain and release state owned by one exact disposed Session lifecycle. */
-  private async retireCore(session: Session): Promise<void> {
-    await this.flush(session)
+  private async retireCore(session: Session): Promise<SessionPersistenceRevision | undefined> {
+    const revision = await this.flush(session)
     const id = session.header.id
-    await this.serialize(id, () => {
+    return this.serialize(id, () => {
       this.live.delete(session)
       if (this.states.get(id)?.owner === session) this.states.delete(id)
+      return revision
     })
   }
 
@@ -1164,19 +1337,39 @@ export class PersistenceCoordinator<TornMarker = unknown> {
   private initFor(session: Session): LiveSessionState {
     const existing = this.live.get(session)
     if (existing) return existing
+    // Capture the id-level retirement before queueing initialization. Waiting
+    // inside serialize would deadlock because retirement cleanup needs the same
+    // chain; omitting the wait lets a same-tick successor overtake old cleanup.
+    const pendingRetirement = this.retirements.get(session.id)
     const reservation = this.preparations.reservationFor(session)
-    if (reservation !== undefined) {
+    // Prepared publication validates and claims its reservation synchronously;
+    // callers rely on announce() throwing before publication completes. There
+    // is no retirement to overtake on this fast path.
+    if (reservation !== undefined && pendingRetirement === undefined) {
       const restored = this.attachPrepared(session, reservation)
       this.live.set(session, restored)
       return restored
     }
-    const seed = session.events.map(e => structuredClone(e))
+    const priorRetirement = pendingRetirement === undefined
+      ? Promise.resolve()
+      : this.settleRetirement(pendingRetirement).catch(
+        () => pendingRetirement.completion.promise.then(() => {}),
+      )
+    const seed = reservation === undefined
+      ? session.events.map(e => structuredClone(e))
+      : undefined
     const live: LiveSessionState = {
       init: Promise.resolve(),
-      writes: this.createWriteBehind(session, () => live.init),
+      writes: this.createWriteBehind(session, () => this.readyLive(live)),
+      ...(pendingRetirement === undefined ? {} : { pendingRetirement }),
     }
     this.live.set(session, live)
-    live.init = this.serialize(session.header.id, () => this.onCreated(session, seed))
+    live.init = priorRetirement.then(() => this.serialize(
+      session.id,
+      () => reservation === undefined
+        ? this.onCreated(session, seed ?? [])
+        : this.attachPreparedCore(session, reservation),
+    ))
     live.init.catch(() => { /* observed by flush/dispose through the controller */ })
     return live
   }
@@ -1186,6 +1379,32 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     session: Session,
     reservation: SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>,
   ): LiveSessionState {
+    const suffix = this.bindPrepared(session, reservation)
+    const live: LiveSessionState = {
+      init: Promise.resolve(),
+      writes: this.createWriteBehind(session, () => this.readyLive(live)),
+    }
+    if (suffix.length > 0) {
+      live.init = this.serialize(session.id, () => this.appendCore(session.id, suffix))
+      live.init.catch(() => { /* observed by flush/dispose through the controller */ })
+    }
+    return live
+  }
+
+  /** Bind a preparation after a captured retirement, within the id chain. */
+  private async attachPreparedCore(
+    session: Session,
+    reservation: SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>,
+  ): Promise<void> {
+    const suffix = this.bindPrepared(session, reservation)
+    if (suffix.length > 0) await this.appendCore(session.id, suffix)
+  }
+
+  /** Validate and claim one prepared state, returning its unpublished suffix. */
+  private bindPrepared(
+    session: Session,
+    reservation: SessionPreparationReservation<PreparedSessionSource<TornMarker>, SessionState>,
+  ): SessionEvent[] {
     const { source, state } = reservation
     if (source.session !== session || state.owner !== undefined
       || state.cursor !== source.inspection.events.length
@@ -1195,15 +1414,7 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     const suffix = session.events.slice(state.cursor).map(event => structuredClone(event))
     this.preparations.attach(reservation)
     state.owner = session
-    const live: LiveSessionState = {
-      init: Promise.resolve(),
-      writes: this.createWriteBehind(session, () => live.init),
-    }
-    if (suffix.length > 0) {
-      live.init = this.serialize(session.id, () => this.appendCore(session.id, suffix))
-      live.init.catch(() => { /* observed by flush/dispose through the controller */ })
-    }
-    return live
+    return suffix
   }
 
   /**
@@ -1311,22 +1522,24 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw new Error(`session "${session.header.id}" already has a persisted log on disk that does not match this live session (id collision)`)
     }
     // Truncate-only repair (no closers): the open turn is NOT closed here.
-    if (tornMarker !== undefined) await this.backend.commitRepair(meta, tornMarker, [])
+    let revision = stored.revision
+    if (tornMarker !== undefined) revision = await this.backend.commitRepair(meta, tornMarker, [])
     this.states.set(session.header.id, {
       meta: { ...meta },
       cursor: storedEvents.length,
       materialized: true,
+      revision,
       owner: session,
     })
     const suffix = seed.slice(storedEvents.length)
     if (suffix.length > 0) await this.appendCore(session.header.id, suffix)
   }
 
-  private async flush(session: Session): Promise<void> {
+  private async flush(session: Session): Promise<SessionPersistenceRevision | undefined> {
     const live = this.initFor(session)
     live.writes.cancelAutomaticWait()
     try {
-      await live.init
+      await this.readyLive(live)
     } catch (error: unknown) {
       // Admission is closed during retirement/teardown, but an ordinary flush
       // may have raced one last enqueue while initialization was pending.
@@ -1334,6 +1547,17 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       throw error
     }
     await live.writes.flush()
+    const state = this.states.get(session.id)
+    if (state?.owner !== session) return undefined
+    return state.revision
+  }
+
+  /** Progress a predecessor that previously blocked initialization, then await ownership setup. */
+  private async readyLive(live: LiveSessionState): Promise<void> {
+    if (live.pendingRetirement !== undefined && !live.pendingRetirement.completed) {
+      await this.settleRetirement(live.pendingRetirement)
+    }
+    await live.init
   }
 
   /** Build one package-private write controller around initialization and id serialization. */

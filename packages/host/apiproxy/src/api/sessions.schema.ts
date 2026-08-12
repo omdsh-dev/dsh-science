@@ -198,6 +198,19 @@ export const toolEventViewSchema = z.discriminatedUnion('for', [
   z.object({ for: z.literal('result'), view: z.looseObject({ card: z.string() }) }),
 ]) as unknown as z.ZodType<ToolEventView>
 
+/** Whether a value is a passthrough-safe plain record with only visible string keys. */
+function isPlainStringRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype: unknown = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return false
+  return Reflect.ownKeys(value).every(key => typeof key === 'string'
+    && Object.prototype.propertyIsEnumerable.call(value, key))
+}
+
+// Validation-only: z.record reconstructs objects through dynamic assignment
+// and therefore drops the valid own JSON key "__proto__".
+const sessionProjectionValuesSchema = z.custom<Record<string, unknown>>(isPlainStringRecord)
+
 /** One session.history item: the session event plus its optional host-computed tool view. */
 export const historyEntrySchema: z.ZodType<Wire<HistoryEntry>> = z.object({
   event: sessionEventSchema,
@@ -212,7 +225,7 @@ export const historyEntrySchema: z.ZodType<Wire<HistoryEntry>> = z.object({
 export const sessionProjectionsBlockSchema = z.object({
   // -1 = empty log (the lastSeq convention of session/subscribed).
   asOfSeq: z.number().int().min(-1),
-  values: z.record(z.string(), z.unknown()),
+  values: sessionProjectionValuesSchema,
 }) as unknown as z.ZodType<Wire<SessionProjectionsBlock>>
 
 /**

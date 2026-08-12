@@ -16,6 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -36,8 +37,10 @@ function request<P>(payload: P): RpcRequest<P> {
 
 /** Whole-value unit folding the latest user/message text; null before the first. */
 type LastUserState = { text: string } | null
+const lastUserDefinitionToken = Symbol('test last-user definition')
 const lastUserUnit = (): ProjectionDefinition<'test/last-user', LastUserState> => ({
   key: 'test/last-user',
+  definitionToken: lastUserDefinitionToken,
   schema: z.union([z.object({ text: z.string() }), z.null()]),
   init: () => null,
   apply: (state, event) => (event.type === 'user/message'
@@ -195,18 +198,19 @@ describe('session.list projections column', () => {
   it('serves cold rows from the persisted projection cache with zero log loads', async () => {
     const { ctx } = await harness(true)
     const coldId = SessionId('session-cold-listing')
+    const coldHeader = { version: 0, id: coldId, createdAt: 5, cwd: '/tmp' } as const
+    const revision = SessionPersistenceRevision('projection-listing-store:cold')
     const load = () => { throw new Error('list must not load event logs') }
     ctx.provide('sessionPersistence', {
-      list: async () => [{ version: 0, id: coldId, createdAt: 5, cwd: '/tmp' }],
+      listSnapshots: async () => [{ header: coldHeader, revision }],
       locate: () => undefined,
       load,
       inspect: load,
       readFrom: load,
     } as never)
     ctx.provide('sessionProjectionCache', {
-      // The carrier hands the listed header through as the identity witness.
-      cachedSnapshot: (meta: { id: unknown; createdAt: number }) =>
-        (meta.id === coldId && meta.createdAt === 5
+      cachedSnapshot: (persisted: { header: { id: unknown }; revision: unknown }) =>
+        (persisted.header.id === coldId && persisted.revision === revision
           ? { asOfSeq: 7, values: { 'test/last-user': { text: 'cached' } } }
           : undefined),
     } as never)
@@ -221,7 +225,10 @@ describe('session.list projections column', () => {
     const { ctx } = await harness(true)
     const coldId = SessionId('session-cold-uncached')
     ctx.provide('sessionPersistence', {
-      list: async () => [{ version: 0, id: coldId, createdAt: 5, cwd: '/tmp' }],
+      listSnapshots: async () => [{
+        header: { version: 0, id: coldId, createdAt: 5, cwd: '/tmp' },
+        revision: SessionPersistenceRevision('projection-listing-store:uncached'),
+      }],
       locate: () => undefined,
     } as never)
     const response = await api(ctx).sessions.list(request({}))

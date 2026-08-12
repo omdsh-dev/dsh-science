@@ -20,7 +20,7 @@ Status: proposed
 
 ### 全量值事件规则
 
-携带状态的日志事件必须携带变更后的完整状态，绝不携带裸增量。三个领域现状已然合规：`todo/write` 是整表快照，`plan/mode` 是一个完整布尔值，`goal/change` 元数据是完整的 `GoalSnapshot`（或一个全量值清除墓碑）。该规则让每个领域的状态转移始终足够廉价（框架逐事件驱动它），让值在协议层自描述，并让任何消费方都可以把最近推送的值当作最终值——靠 seq 比较获得乱序免疫，且自愈：漏掉的更新会被下一次更新纠正。
+携带状态的日志事件必须携带变更后的完整状态，绝不携带裸增量。列出的三个全量值领域均合规：`todo/write` 是整表快照，`plan/mode` 是一个完整布尔值，`goal/change` 元数据是完整的 `GoalSnapshot`（或一个全量值清除墓碑）。该规则让这些状态转移保持廉价（框架逐事件驱动它们），让值在协议层自描述，并让任何消费方都可以把最近推送的值当作最终值——靠 seq 比较获得乱序免疫，且自愈：漏掉的更新会被下一次更新纠正。事实/provenance 领域可以改为拥有严格的多事件折叠及其转移成本；注册表仍然只供给它完成后的值。
 
 ### host 侧投影注册表（`dsh-session-projection`，新包）
 
@@ -33,13 +33,21 @@ export interface SessionProjectionMap {}   // the single type table for the whol
 
 export interface ProjectionDefinition<K extends keyof SessionProjectionMap, S> {
   key: K
+  /** Module-private identity of one interchangeable definition family. */
+  definitionToken: symbol
   schema: ZodType<SessionProjectionMap[K]>  // validates the payload before it leaves the host
+  /** Optional parser for untrusted persisted private state; never runs on the live path. */
+  checkpointStateSchema?: ZodType<S>
+  /** Optional pure extractor binding self-watermarked private state to the row's outer seq. */
+  checkpointStateSeq?(state: S): number
   /** State for the empty log. */
   init(): S
   /** Pure transition: previous state + one event → next state. The framework drives it; domains hold no subscriptions. */
   apply(state: S, event: SessionEvent): S
   /** State → wire payload (the read-side projection). */
   view(state: S): SessionProjectionMap[K]
+  /** Optional narrowing predicate when changed private state may preserve the public view. */
+  viewChanged?(previous: S, next: S): boolean
   /** State must be plain JSON (persisted-cache precondition); bump to invalidate persisted rows. */
   stateVersion: number
 }
@@ -50,10 +58,11 @@ declare module 'cordis' {
 ```
 
 - 值就是协议层的 JSON 载荷；同一张类型表经 `import type` 端到端贯通（host 侧单元、协议块、React 钩子）——没有第二张 DTO 表，也没有独立的客户端「views」表。值如何*渲染*是 slot 体系的事，永远不归投影层管。
-- **host 是投影唯一的计算地点。** 框架主动驱动（eager drive）每个已注册的单元：每个已提交的会话事件都经过 `apply`；对某事件不感兴趣的单元返回同一个状态引用，而引用未变（`Object.is`）就不产生任何下游工作。客户端从不折叠领域事件——它们收到的是成品值（基线块 + 下文的推送帧）。这消除了双重实现陷阱（plan 的双事件折叠只在 host 写一遍），也消除了一切客户端侧领域代码。
-- **状态永远靠计算得出，绝不入日志。** 日志只存事件；单元的状态住在框架的按会话水位线缓存里（每单元一份 `{state, observedSeq}`），并在后续阶段进入 domain-KV 存储 seam 上的**持久投影缓存（persisted projection cache）**：形如 `(sessionId, key, ver, seq, val)` 的行（`ver` = 单元的 `stateVersion`，`seq` = 水位线，`val` = 状态 JSON）。一行永远不会是错的，至多是陈旧的——其 `seq` 精确说明陈旧到哪。冷读与活读共用同一套读取配方：取缓存状态（或 `init()`），只对超出其水位线的事件做正向 `apply`，再对结果做 `view`。冷列表（跨全部 workspace 列出每个会话的标题）变成一次索引读，至多外加一小段尾部回放；session-persistence seam 在同一后续阶段为这段尾部补一个按 seq 起读的原语。写入策略：节流（次数/间隔，可配置）外加两个强制点——`turn/end` 与 detach（由活转冷的时刻）。两次写入之间崩溃的代价是尾部回放更长一些，绝不会是值出错。
+- **host 是投影唯一的计算地点。** 框架主动驱动每个已注册单元：每个已提交的会话事件都经过 `apply`。公开值和私有证明都未推进时，单元返回同一个引用。drive 分两阶段：所有成功单元先提交各自状态与水位，随后才运行公开 view 或通知，因此重入 snapshot 不会看到只 apply 一半的 registry cut。apply 失败只会使该单元的 cell 失效，留待从完整日志重试，后续单元仍会收到事件。`Object.is` 是第一道通知闸门。私有回放状态推进而公开值不变的领域提供 `viewChanged`；predicate、view 与 listener 的错误都在状态推进后被隔离。客户端从不折叠领域事件——它们收到的是完成且隔离的 JSON 值（基线块 + 推送帧）。
+- **状态永远靠计算得出，绝不入日志。** 日志只存事件；单元状态住在框架的按会话水位缓存（每单元 `{state, observedSeq}`）与 domain-KV seam 上的**持久投影缓存**中，缓存行形如 `(sessionId, key, ver, seq, val)`。缓存行只是非权威捷径，可能陈旧、版本不兼容或 schema-invalid。`checkpointStateSchema` 只负责准入，输出必须与输入 JSON 深度相等，绝不在读取时迁移。provenance 较重的单元还实现纯 `checkpointStateSeq`；其私有状态必须逐个 committed event 推进内嵌水位，写出或准入时都必须与缓存行外层 `seq` 相等，防止合法旧状态被拼到较新水位下。公开值、listener 值与 checkpoint 状态都是互相独立的纯 JSON 副本。被拒行不会出现在零 I/O view 中，restore 前必须完整回放。
+- **缓存服从持久日志顺序。** 冷读和活读取得已准入的缓存状态（或完整读取后从 `init()` 开始），只正向 apply 超出水位的事件，再执行 `view`。只有全部已准入行构成同一个精确水位切面时，才供给零 I/O 快照。写入按次数/间隔节流，并在 `turn/end` 和 detach 强制执行。同一 session id 的操作串行化；每次写入在串行区内取快照，等待 session persistence 把该精确 live 或 retiring Session lifecycle 排空后，再替换缓存记录。崩溃或缓存写失败可能留下 revision 不匹配、会被丢弃并完整回放的切面，但绝不能留下领先日志的切面；较旧的并发写也不能覆盖较新的切面。
 - 领域的输入事件集由领域自己选择：todos 只折叠 `todo/write`；plan 折叠 `plan/mode` 外加它自己的 `/plan` `command/run` 记录（见 plan 一节）；goal 折叠 `goal/change` 元数据；会话标题折叠其标题事件（顺带下线专设的 `session/title` 帧与客户端的标题快照表——这是该 seam 收编的第四个手工投影）。
-- 注册是 effect（disposer 随 fiber 走）：插件卸载后其 key 从后续响应中消失，客户端将其读作能力缺失——HMR（热模块替换）语义随之自动成立。key 重复直接 throw。领域插件在 `ctx.inject(['sessionProjections'], …)` 下注册，因此不带注册表的 headless 组装完全不受影响。
+- 注册是由调用方 fiber 拥有的 effect。重复组合只有在 key、模块私有 `definitionToken` 与 `stateVersion` 全部相同时，才共享同一 canonical definition 及其 cell；其他 active owner 一律冲突，因此版本号不会被误当作两份函数同 owner、同语义的证明。真实 Cordis HMR 重叠期间，全部旧 owner 进入 unloading 后 replacement 才能接管；token 或版本变化都会从日志重建 cell。若 replacement 在旧 cleanup 完成前退出，注册表也绝不会重新发布已经 unloading 的旧 definition。最后一个 live disposer 会移除 key。领域插件在 `ctx.inject(['sessionProjections'], …)` 下注册，因此不带注册表的 headless 组装完全不受影响。
 - 该包拥有 `./invariant`（每个被服务的 key 都有一条存活的注册）。
 
 ### 已交付的消费方：subagent 身份单元
@@ -83,9 +92,9 @@ api-proxy 的历史处理器切出尾页后同步遍历注册表——全程没�
 { type: 'session/projection', sessionId, key: string, value: unknown, seq: number }
 ```
 
-只要某单元的状态引用发生变化（上文的 `Object.is` 闸门），框架就发出该帧；`seq` 是发出时该单元的水位线。这是实时推送状态，绝不入日志——与 tool-view 的 `view` slot 同一姿态：回放时在 host 重新计算。
+当 `apply` 返回不同的 state reference，且可选的收窄型 `viewChanged` predicate 没有抑制该 transition 时，框架才会发出该帧；`seq` 是发出时单元的水位线。predicate 不能把 same-reference no-op 变成 change。这是实时推送状态，绝不入日志——与 tool-view 的 `view` slot 同一姿态：回放时在 host 重新计算。
 
-客户端对象层为每个会话维护一个**通用值仓（value store）**：`key → { value, seq }`，由尾页的 projections 块播种、由该帧更新，唯一规则是 **seq 高者胜**。重放的基线无法把更新的帧往回滚；丢失一个帧的代价只是陈旧——到下一个帧或基线为止——绝不会出错。没有 `fromEvent`，没有按领域的 cell 注册，没有客户端侧领域折叠——领域交付投影支持只需**零客户端代码**（`SessionProjectionMap` merge 经 `/types` 出口同时服务两侧）。专设的 `session/title` 帧与 manager 的标题快照表都收编进这对通用机制。所有按领域自造的栅栏（#587 的三层、#527 的写 revision）都消融进这一条 seq 规则。
+客户端对象层为每个会话维护一个**通用值仓（value store）**：`key → { value, seq }`，由尾页的 projections 块播种、由该帧更新，唯一规则是 **seq 高者胜**。重放的基线无法替换已经见过的更高 seq 值；丢失一个帧会让客户端陈旧，直到下一个帧或基线到来。语义正确性仍来自 host fold 与缓存行的生命周期绑定，而不是这条合并规则。没有 `fromEvent`，没有按领域的 cell 注册，没有客户端侧领域折叠——领域交付投影支持只需**零客户端代码**（`SessionProjectionMap` merge 经 `/types` 出口同时服务两侧）。专设的 `session/title` 帧与 manager 的标题快照表都收编进这对通用机制。所有按领域自造的栅栏（#587 的三层、#527 的写 revision）都消融进这一条 seq 规则。
 
 ### plan 走标准命令通道（完整示例）
 

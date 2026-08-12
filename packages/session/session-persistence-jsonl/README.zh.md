@@ -45,7 +45,7 @@ JSONL 持久会话存储后端：`SessionPersistence` 的一个具体实现（`d
 - **崩溃恢复：保留有效尾部工作。**`load` 验证每个完整压缩 frame，并扫描解压 JSONL。最后 frame 结构不完整时，读取器保留其完整解码记录，从 frame 开头截断，并使用共享[持久化约定](../../../.agents/notes/implemented/architecture/2026-06-14-session-persistence.md) 需要的合成工具、步骤和轮次 closer 重新编码这些记录。原始 mode 从第一个不完整行截断。已经存在却没有完整 header frame 的压缩工件、完整 frame 中的 checksum/解压失败，或位于最后已提交的 `turn/end` 处或之前的缺陷都属于损坏，会被拒绝。
 - **非修改式检查。**`inspect()` 返回不可变、平衡的逻辑视图，并可在内存中合成恢复 closer，但不会截断不完整尾部或更改轻量修订。
 - **连续 seq。**`append` 拒绝第一个 `seq` 不继续已存储日志的批次，并拒绝无法 JSON 序列化的 `event.data`，同时命名违规事件类型。
-- **轻量修订。**`listSnapshots(signal?)` 使用 device、inode、size 和纳秒时间戳标识日志，避免解析完整日志；该标识会在 append、修复、替换或存储变更后改变。完整前缀读取要求读取字节前后的身份一致，`readStoredRevision()` 使用同一身份校验保留的 preparation，而不加载日志。快照列表通过产物发现原样转发该信号，并在每个 `stat` 前后检查取消；由于文件系统 `stat` 不可中断，取消会等待活动调用完成，然后在不启动另一次调用的情况下拒绝。
+- **轻量修订。** revision 组合 device、inode、size 和纳秒时间戳，因此会在 append、修复、路径替换或存储变更后改变。完整前缀与仅 header 的快照读取都打开一个文件句柄，并要求其身份在字节读取前后保持稳定；`append` 与修复返回它们刚完成同步的同一句柄身份，不会再次按 id 解析路径。`readStoredRevision()` 使用同一表示校验保留的 preparation，而不加载日志。快照列表通过发现过程原样转发信号，并在每个不可中断的句柄操作前后检查取消。
 
 ## 写入路径
 

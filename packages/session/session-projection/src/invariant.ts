@@ -15,9 +15,11 @@ export const name = 'session-projection-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: the registry's own contracts (duplicate-key and
- * stateVersion rejection, effect-tied removal, the Object.is change gate) are
- * enforced synchronously inside the service and proven by its spec, the
+ * No runtime invariant: the registry's own contracts (explicit definition-
+ * token sharing, conflicting-owner rejection, effect-tied removal,
+ * persisted-state admission, and the default Object.is plus optional
+ * unit-owned public-change gate) are enforced synchronously inside the
+ * service and proven by its spec, the
  * drive relation (every committed `session/event` passes every unit) would
  * require re-running the drive to check — duplicating the implementation
  * rather than detecting drift — and the served-value relation (every served

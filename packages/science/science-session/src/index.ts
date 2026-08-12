@@ -12,15 +12,35 @@ import { SCIENCE_PROJECTION_STATE_VERSION } from './ids.ts'
 import {
   applyScienceProjectionState,
   emptyScienceProjectionState,
+  scienceProjectionChanged,
   scienceProjectionSchema,
   scienceProjectionStateSchema,
+  scienceProjectionStateSeq,
+  viewScienceProjectionState,
 } from './projection.ts'
-import type { ScienceProjectionState } from './types.ts'
+import type { ScienceProjectionState } from './projection-private.ts'
 
-export * from './types.ts'
-export * from './domain.ts'
-export * from './fold.ts'
-export * from './projection.ts'
+// Type-only re-exports keep event and projection declaration merging visible
+// without turning the pure type outlet into a runtime module.
+export type * from './types.ts'
+export type * from './domain.ts'
+export {
+  SCIENCE_EVENT_VERSION,
+  ScienceChartId,
+  ScienceEnvironmentProfileId,
+  ScienceRunId,
+  ScienceScratchKey,
+} from './ids.ts'
+export {
+  decodeScienceChart,
+  decodeScienceDomainEvent,
+  decodeScienceEnvironment,
+  decodeScienceMode,
+  decodeScienceOutcome,
+  decodeScienceRunStarted,
+  decodeScienceRunTerminal,
+  replayScience,
+} from './fold.ts'
 
 /** Cordis plugin name used by Loader diagnostics. */
 export const name = 'science-session'
@@ -28,18 +48,21 @@ export const name = 'science-session'
 /** No hard service dependency; projection composition is optional. */
 export const inject: readonly string[] = []
 
+const scienceProjectionDefinitionToken = Symbol('science projection definition')
+
 /** Register the Science projection only when the host composes its registry. */
 export function apply(ctx: Context): void {
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     projectionCtx.sessionProjections.register<'science', ScienceProjectionState>({
       key: 'science',
+      definitionToken: scienceProjectionDefinitionToken,
       schema: scienceProjectionSchema,
+      checkpointStateSchema: scienceProjectionStateSchema,
+      checkpointStateSeq: scienceProjectionStateSeq,
       init: emptyScienceProjectionState,
       apply: applyScienceProjectionState,
-      view: (state) => {
-        scienceProjectionStateSchema.parse(state)
-        return state.value
-      },
+      view: viewScienceProjectionState,
+      viewChanged: scienceProjectionChanged,
       stateVersion: SCIENCE_PROJECTION_STATE_VERSION,
     })
   })

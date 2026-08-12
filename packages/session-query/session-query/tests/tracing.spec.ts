@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
-import SessionPersistence from '@deepseek-ai/dsh-session-persistence'
+import SessionPersistence, { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
 import { type SessionQueryErrorCode } from '@deepseek-ai/dsh-session-query'
 import { TestSessionQueryEngine } from './test-service.ts'
 
@@ -78,9 +78,17 @@ class TracePersistence extends SessionPersistence {
     return Promise.resolve(structuredClone(entry))
   }
 
-  async readFrom(id: SessionIdType, fromSeq: number): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async readFrom(id: SessionIdType, fromSeq: number): Promise<{
+    meta: SessionHeader
+    events: SessionEvent[]
+    revision: SessionPersistenceRevision
+  }> {
     const whole = await this.inspect(id)
-    return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
+    return {
+      meta: whole.meta,
+      events: whole.events.filter(event => event.seq >= fromSeq),
+      revision: SessionPersistenceRevision(`trace:${id}:${whole.events.length}`),
+    }
   }
 
   list(): Promise<SessionHeader[]> {
