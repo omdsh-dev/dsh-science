@@ -8,7 +8,7 @@ Science Session Domain 负责精简、读取时必需的事实及其确定性 pr
 
 `ScienceRunId`、`ScienceEnvironmentProfileId`、`ScienceChartId` 与 `ScienceScratchKey` 是[品牌化标识](core.md#branded-ids)。只有 `SessionHeader.agentPreset` 为 `science` 时，Session 才能包含 Science 事件。唯一一次 mode binding 前，projection 为 `null`；缺少 `science` key 表示没有组合该包。
 
-mode 事件只记录稳定模式事实，且必须早于第一条 step、request header 或 tool call。run、chart 与 Outcome 记录向后引用拥有 prompt 与模型 provenance 的最新 mode 后 `request/header`，并引用一项唯一且尚未结算、用于锚定模型操作的 tool call。
+mode 事件只记录稳定模式事实，且必须早于第一条 step、request header 或 tool call。run、chart 与 Outcome 记录向后引用拥有 prompt 与模型 provenance 的最新 mode 后 `request/header`，并引用一项唯一且尚未结算、用于锚定模型操作的 tool call。result 或所属 `step/end` 会结算 call；Python 与 R run、chart、Outcome 分别要求 `run_python` 或 `run_r`、`save_chart`、`publish_outcome`。
 
 ```ts type-equiv
 /** The preset-bound Science mode identity recorded once per session. */
@@ -50,7 +50,7 @@ interface ScienceEnvironmentBinding {
 
 ## Run、图表与 Outcome
 
-run start 是完整且不可变的 execution identity。finish 重复这些字段并增加一个终态。`interrupted` 永远不是 finish payload：只有 `session/end-seed` 关闭仍为 running 的记录时，回放才会派生它。chart version 引用成功 run 与不可变 PNG attachment。Outcome revision 引用先前 run、chart version 或 message，不读取也不修改 Goal 状态。每项 tool call 只授权一个 Science fact，payload timestamp 也不得早于其 supporting fact。
+run start 是完整且不可变的 execution identity。finish 重复这些字段并增加一个终态。`interrupted` 永远不是 finish payload：只有 `session/end-seed` 关闭仍为 running 的记录时，回放才会派生它。chart version 引用成功 run 与不可变 PNG attachment。Outcome revision 引用先前 run、chart version 或 message，不读取也不修改 Goal 状态。每项 tool call 只授权一个 Science fact，payload timestamp 也不得早于其 supporting fact。公开 projection 保持仅含元数据；私有 checkpoint 保存稀疏、脱敏的见证，且只有严格回放能完全复现该值时才接受恢复值。
 
 ```ts type-equiv
 /** Run state served by the Science projection. */

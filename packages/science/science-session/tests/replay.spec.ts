@@ -13,7 +13,7 @@ import {
   ScienceRunId,
   ScienceScratchKey,
 } from '../src/index.ts'
-import type { ScienceProjection, ScienceRunStarted } from '../src/index.ts'
+import type { ScienceProjection, ScienceProjectionState, ScienceRunStarted } from '../src/index.ts'
 
 const FINGERPRINT = 'b'.repeat(64)
 const RUN_ID = ScienceRunId('run-1')
@@ -208,6 +208,24 @@ describe('Science cold replay', () => {
     )) as ReturnType<typeof ctx.sessionProjections.checkpoint>
 
     expect(ctx.sessionProjections.viewCheckpoint(checkpoint).science).toEqual(live)
+
+    const science = checkpoint.science!
+    const state = science.val as ScienceProjectionState
+    const tampered = {
+      ...checkpoint,
+      science: {
+        ...science,
+        val: {
+          ...state,
+          witness: state.witness.filter(candidate => candidate.seq !== 8),
+        },
+      },
+    }
+    expect(() => ctx.sessionProjections.viewCheckpoint(tampered))
+      .toThrow(/invalid Science projection checkpoint state/)
+    expect(() => ctx.sessionProjections.restore(tampered, [], science.seq + 1))
+      .toThrow(/invalid Science projection checkpoint state/)
+    expect(ctx.sessionProjections.snapshot(session).values.science).toEqual(live)
   })
 
   it('discards a version-mismatched checkpoint and refolds the complete log', async () => {

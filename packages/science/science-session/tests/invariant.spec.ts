@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import InvariantService, { InvariantError } from '@deepseek-ai/dsh-invariants'
+import InvariantRegistry, { InvariantError } from '@deepseek-ai/dsh-invariants'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -23,7 +23,7 @@ const OUTCOME_CALL_ID = CallId('call-outcome')
 async function setup(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
-  await ctx.plugin(InvariantService, { enabled: true })
+  await ctx.plugin(InvariantRegistry, { enabled: true })
   await ctx.plugin(ScienceInvariant)
   return ctx
 }
@@ -206,7 +206,7 @@ describe('Science stream invariant', () => {
     appendLegalChain(session)
     const before = session.seq
 
-    await ctx.plugin(InvariantService, { enabled: true })
+    await ctx.plugin(InvariantRegistry, { enabled: true })
     await ctx.plugin(ScienceInvariant)
 
     expect(() => { appendMode(session) }).toThrow(expect.objectContaining<Partial<InvariantError>>({
@@ -247,6 +247,71 @@ describe('Science stream invariant', () => {
       'science/chart-saved',
       'science/outcome-published',
     ])
+  })
+
+  it('rejects a Science fact after the authorizing call step ended without committing it', async () => {
+    const ctx = await setup()
+    const session = ctx.sessions.create(SessionId('science-invariant-call-after-step'), {
+      meta: { agentPreset: 'science' },
+    })
+    const modeTime = appendMode(session)
+    session.append('science/environment-bound', {
+      version: 1,
+      environment: {
+        revision: 1,
+        profileId: ScienceEnvironmentProfileId('profile-1'),
+        configuredAt: modeTime,
+        validatedAt: modeTime,
+        status: 'applied',
+        python: {
+          language: 'python',
+          configuredPrefix: '/opt/science',
+          canonicalPrefix: '/opt/science',
+          executable: '/opt/science/bin/python',
+          executableIdentity: 'dev:1-ino:2',
+          languageVersion: '3.13.5',
+          condaHistorySha256: 'a'.repeat(64),
+          bindingFingerprint: FINGERPRINT,
+          capability: 'available',
+        },
+      },
+    })
+    session.append('step/start', { turn: 1, step: 1 })
+    const request = session.append('request/header', {
+      header: { config: { provider: 'test', model: 'test-model' } },
+      reason: 'initial',
+    })
+    const callId = CallId('call-after-step')
+    const call = session.append('tool/call', {
+      turn: 1,
+      step: 1,
+      callId,
+      name: 'run_python',
+      arguments: '{}',
+    })
+    session.append('step/end', { turn: 1, step: 1 })
+    const before = session.seq
+
+    expect(() => session.append('science/run-started', {
+      version: 1,
+      run: {
+        runId: ScienceRunId('run-after-step'),
+        language: 'python',
+        toolCallId: callId,
+        requestHeaderSeq: request.seq,
+        environmentRevision: 1,
+        environmentFingerprint: FINGERPRINT,
+        startedAt: call.time,
+        codeSha256: 'c'.repeat(64),
+        scratchKey: ScienceScratchKey('d'.repeat(64)),
+        runDirectoryRef: 'runs/run-after-step/',
+        status: 'running',
+      },
+    })).toThrow(expect.objectContaining<Partial<InvariantError>>({
+      code: 'INVARIANT',
+      packageName: PACKAGE_NAME,
+    }))
+    expect(session.seq).toBe(before)
   })
 
   it('does not advance staged fold state after a rejected append', async () => {

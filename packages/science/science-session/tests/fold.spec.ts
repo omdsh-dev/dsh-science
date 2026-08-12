@@ -71,6 +71,13 @@ const environment = (
   ...overrides,
 })
 
+const environmentWithoutPython = (
+  overrides: Partial<Omit<ScienceEnvironmentBinding, 'python'>> = {},
+): ScienceEnvironmentBinding => {
+  const { python: _python, ...withoutPython } = environment()
+  return { ...withoutPython, ...overrides }
+}
+
 const runStarted = (
   overrides: Partial<ScienceRunStarted> = {},
 ): ScienceRunStarted => ({
@@ -156,6 +163,21 @@ function toolResult(seq: number, time: number, callId: ReturnType<typeof CallId>
   })
 }
 
+function toolCall(
+  seq: number,
+  time: number,
+  callId: ReturnType<typeof CallId>,
+  name: string,
+): SessionEvent {
+  return event('tool/call', seq, time, {
+    turn: 1,
+    step: 1,
+    callId,
+    name,
+    arguments: '{}',
+  })
+}
+
 function legalEvents(): SessionEvent[] {
   return [
     event('science/mode-bound', 0, 100, { version: 1, mode: mode() }),
@@ -207,11 +229,12 @@ describe('strict Science fold', () => {
     expect(state.lastScienceTime).toBe(180)
     expect(state.requestHeaders).toEqual([{ seq: 2, time: 120 }])
     expect(state.toolCalls).toEqual([
-      { seq: 3, time: 130, callId: RUN_CALL_ID },
-      { seq: 6, time: 160, callId: CHART_CALL_ID },
-      { seq: 8, time: 175, callId: OUTCOME_CALL_ID },
+      { seq: 3, time: 130, callId: RUN_CALL_ID, turn: 1, step: 1, name: 'run_python' },
+      { seq: 6, time: 160, callId: CHART_CALL_ID, turn: 1, step: 1, name: 'save_chart' },
+      { seq: 8, time: 175, callId: OUTCOME_CALL_ID, turn: 1, step: 1, name: 'publish_outcome' },
     ])
     expect(state.toolResults).toEqual([])
+    expect(state.settledToolCallSeqs).toEqual([])
     expect(state.messageFacts).toEqual([])
     expect(state.consumedToolCallSeqs).toEqual([3, 6, 8])
   })
@@ -259,9 +282,9 @@ describe('strict Science fold', () => {
         failureReason: 'invalid binding',
         python: interpreter({ capability: 'invalid' }),
       }),
-      environment({ python: undefined }),
+      environmentWithoutPython(),
       environment({ python: interpreter({ language: 'r' }) }),
-      environment({ python: undefined, r: interpreter() }),
+      environmentWithoutPython({ r: interpreter() }),
       environment({ configuredAt: 110, validatedAt: 109 }),
       environment({
         python: interpreter({ capability: 'invalid', reason: 'invalid binding' }),
@@ -436,7 +459,7 @@ describe('strict Science fold', () => {
       event('science/mode-bound', 1, 100, { version: 1, mode: mode() }),
       event('science/environment-bound', 2, 110, { version: 1, environment: environment() }),
       event('request/header', 3, 120, {}),
-      event('tool/call', 4, 130, { callId: RUN_CALL_ID }),
+      toolCall(4, 130, RUN_CALL_ID, 'run_python'),
       event('science/run-started', 5, 140, { version: 1, run: runAfterMode }),
       event('science/run-finished', 6, 150, { version: 1, run: terminalAfterMode }),
     ]
@@ -445,14 +468,14 @@ describe('strict Science fold', () => {
         event('request/header', 0, 90, {}),
         event('science/mode-bound', 1, 100, { version: 1, mode: mode() }),
         event('science/environment-bound', 2, 110, { version: 1, environment: environment() }),
-        event('tool/call', 3, 130, { callId: RUN_CALL_ID }),
+        toolCall(3, 130, RUN_CALL_ID, 'run_python'),
         event('science/run-started', 4, 140, {
           version: 1,
           run: runStarted({ requestHeaderSeq: 0 }),
         }),
       ], /cannot follow pre-mode/],
       ['run tool call', [
-        event('tool/call', 0, 90, { callId: RUN_CALL_ID }),
+        toolCall(0, 90, RUN_CALL_ID, 'run_python'),
         event('science/mode-bound', 1, 100, { version: 1, mode: mode() }),
         event('science/environment-bound', 2, 110, { version: 1, environment: environment() }),
         event('request/header', 3, 120, {}),
@@ -464,14 +487,14 @@ describe('strict Science fold', () => {
       ['chart request header', [
         event('request/header', 0, 90, {}),
         ...validRunPrefix,
-        event('tool/call', 7, 160, { callId: CHART_CALL_ID }),
+        toolCall(7, 160, CHART_CALL_ID, 'save_chart'),
         event('science/chart-saved', 8, 170, {
           version: 1,
           chart: chart({ requestHeaderSeq: 0 }),
         }),
       ], /cannot follow pre-mode/],
       ['chart tool call', [
-        event('tool/call', 0, 90, { callId: CHART_CALL_ID }),
+        toolCall(0, 90, CHART_CALL_ID, 'save_chart'),
         ...validRunPrefix,
         event('science/chart-saved', 7, 170, {
           version: 1,
@@ -503,7 +526,7 @@ describe('strict Science fold', () => {
     const staleHeader = [
       ...legalEvents().slice(0, 3),
       event('request/header', 3, 125, {}),
-      event('tool/call', 4, 130, { callId: RUN_CALL_ID }),
+      toolCall(4, 130, RUN_CALL_ID, 'run_python'),
       event('science/run-started', 5, 140, {
         version: 1,
         run: runStarted({ requestHeaderSeq: 2 }),
@@ -513,7 +536,7 @@ describe('strict Science fold', () => {
 
     const callBeforeHeader = [
       ...legalEvents().slice(0, 2),
-      event('tool/call', 2, 115, { callId: RUN_CALL_ID }),
+      toolCall(2, 115, RUN_CALL_ID, 'run_python'),
       event('request/header', 3, 120, {}),
       event('science/run-started', 4, 140, {
         version: 1,
@@ -535,17 +558,17 @@ describe('strict Science fold', () => {
         event('science/run-started', 6, 160, { version: 1, run: secondRun }),
       ]],
       ['chart', [
-        ...legalEvents().slice(0, 6),
-        event('science/chart-saved', 6, 170, {
+        ...legalEvents().slice(0, 8),
+        event('science/chart-saved', 8, 180, {
           version: 1,
-          chart: chart({ toolCallId: RUN_CALL_ID }),
+          chart: chart({ version: 2, createdAt: 179 }),
         }),
       ]],
       ['outcome', [
-        ...legalEvents().slice(0, 8),
-        event('science/outcome-published', 8, 180, {
+        ...legalEvents(),
+        event('science/outcome-published', 10, 190, {
           version: 1,
-          outcome: outcome({ toolCallId: CHART_CALL_ID }),
+          outcome: outcome({ revision: 2, publishedAt: 189 }),
         }),
       ]],
     ]
@@ -580,6 +603,68 @@ describe('strict Science fold', () => {
     ])).toThrow(/does not identify one call after its cited request\/header/)
   })
 
+  it('rejects a Science fact after its authorizing tool call step has ended', () => {
+    const cases: Array<readonly [string, SessionEvent[]]> = [
+      ['run', [
+        ...legalEvents().slice(0, 4),
+        event('step/end', 4, 135, { turn: 1, step: 1 }),
+        event('science/run-started', 5, 140, { version: 1, run: runStarted() }),
+      ]],
+      ['chart', [
+        ...legalEvents().slice(0, 7),
+        event('step/end', 7, 165, { turn: 1, step: 1 }),
+        event('science/chart-saved', 8, 170, { version: 1, chart: chart() }),
+      ]],
+      ['outcome', [
+        ...legalEvents().slice(0, 9),
+        event('step/end', 9, 177, { turn: 1, step: 1 }),
+        event('science/outcome-published', 10, 180, { version: 1, outcome: outcome() }),
+      ]],
+    ]
+
+    for (const [name, events] of cases) {
+      expect(() => foldScience(events), name).toThrow()
+    }
+
+    expect(foldScience([
+      ...legalEvents().slice(0, 4),
+      event('step/end', 4, 135, { turn: 2, step: 1 }),
+      event('science/run-started', 5, 140, { version: 1, run: runStarted() }),
+    ]).runs).toEqual([runStarted()])
+  })
+
+  it('requires the operation-specific tool name and accepts the R runner name', () => {
+    const wrongNames: Array<readonly [string, SessionEvent[], RegExp]> = [
+      ['run', legalEvents().slice(0, 5).map((candidate, index) => index === 3
+        ? toolCall(3, 130, RUN_CALL_ID, 'bash')
+        : candidate), /expected run_python/],
+      ['chart', legalEvents().slice(0, 8).map((candidate, index) => index === 6
+        ? toolCall(6, 160, CHART_CALL_ID, 'bash')
+        : candidate), /expected save_chart/],
+      ['outcome', legalEvents().map((candidate, index) => index === 8
+        ? toolCall(8, 175, OUTCOME_CALL_ID, 'bash')
+        : candidate), /expected publish_outcome/],
+    ]
+    for (const [name, events, pattern] of wrongNames) {
+      expect(() => foldScience(events), name).toThrow(pattern)
+    }
+
+    const rRun = runStarted({ language: 'r' })
+    const rEvents = [
+      legalEvents()[0]!,
+      event('science/environment-bound', 1, 110, {
+        version: 1,
+        environment: environmentWithoutPython({
+          r: interpreter({ language: 'r' }),
+        }),
+      }),
+      legalEvents()[2]!,
+      toolCall(3, 130, RUN_CALL_ID, 'run_r'),
+      event('science/run-started', 4, 140, { version: 1, run: rRun }),
+    ]
+    expect(foldScience(rEvents).runs).toEqual([rRun])
+  })
+
   it('requires payload times to follow every authorizing and cited event', () => {
     const runCases: Array<readonly [string, SessionEvent[]]> = [
       ['request header', legalEvents().slice(0, 5).map((candidate, index) => index === 4
@@ -611,7 +696,7 @@ describe('strict Science fold', () => {
       ['request header', [
         ...legalEvents().slice(0, 6),
         event('request/header', 6, 165, {}),
-        event('tool/call', 7, 160, { callId: CHART_CALL_ID }),
+        toolCall(7, 160, CHART_CALL_ID, 'save_chart'),
         event('science/chart-saved', 8, 170, {
           version: 1,
           chart: chart({ requestHeaderSeq: 6, createdAt: 164 }),
@@ -626,7 +711,7 @@ describe('strict Science fold', () => {
       ['source terminal event', [
         ...legalEvents().slice(0, 5),
         event('science/run-finished', 5, 165, { version: 1, run: runTerminal() }),
-        event('tool/call', 6, 150, { callId: CHART_CALL_ID }),
+        toolCall(6, 150, CHART_CALL_ID, 'save_chart'),
         event('science/chart-saved', 7, 170, {
           version: 1,
           chart: chart({ createdAt: 164 }),
@@ -641,7 +726,7 @@ describe('strict Science fold', () => {
       ['request header', [
         ...legalEvents().slice(0, 8),
         event('request/header', 8, 178, {}),
-        event('tool/call', 9, 175, { callId: OUTCOME_CALL_ID }),
+        toolCall(9, 175, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 10, 180, {
           version: 1,
           outcome: outcome({ requestHeaderSeq: 8, publishedAt: 177 }),
@@ -656,7 +741,7 @@ describe('strict Science fold', () => {
       ], /authorizing facts/],
       ['run evidence', [
         ...legalEvents().slice(0, 6),
-        event('tool/call', 6, 145, { callId: OUTCOME_CALL_ID }),
+        toolCall(6, 145, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 7, 160, {
           version: 1,
           outcome: outcome({
@@ -667,7 +752,7 @@ describe('strict Science fold', () => {
       ], /precedes cited run evidence/],
       ['chart evidence', [
         ...legalEvents().slice(0, 8),
-        event('tool/call', 8, 165, { callId: OUTCOME_CALL_ID }),
+        toolCall(8, 165, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 9, 180, {
           version: 1,
           outcome: outcome({ publishedAt: 169 }),
@@ -677,7 +762,7 @@ describe('strict Science fold', () => {
         legalEvents()[0]!,
         event('request/header', 1, 110, {}),
         event('assistant/message', 2, 130, {}),
-        event('tool/call', 3, 120, { callId: OUTCOME_CALL_ID }),
+        toolCall(3, 120, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 4, 140, {
           version: 1,
           outcome: outcome({
@@ -699,7 +784,7 @@ describe('strict Science fold', () => {
       legalEvents()[0]!,
       event('request/header', 1, 110, {}),
       event('assistant/message', 2, 120, {}),
-      event('tool/call', 3, 125, { callId: OUTCOME_CALL_ID }),
+      toolCall(3, 125, OUTCOME_CALL_ID, 'publish_outcome'),
       event('science/outcome-published', 4, 130, {
         version: 1,
         outcome: outcome({
@@ -737,7 +822,7 @@ describe('strict Science fold', () => {
       ...legalEvents().slice(0, 2),
       event('science/environment-bound', 2, 120, { version: 1, environment: invalidEnvironment }),
       event('request/header', 3, 130, {}),
-      event('tool/call', 4, 140, { callId: RUN_CALL_ID }),
+      toolCall(4, 140, RUN_CALL_ID, 'run_python'),
       event('science/run-started', 5, 150, {
         version: 1,
         run: runStarted({ requestHeaderSeq: 3, startedAt: 149 }),
@@ -745,7 +830,7 @@ describe('strict Science fold', () => {
     ]
     const secondChart = (overrides: Partial<ScienceChartVersion>): SessionEvent[] => [
       ...legalEvents().slice(0, 8),
-      event('tool/call', 8, 180, { callId: secondCall }),
+      toolCall(8, 180, secondCall, 'save_chart'),
       event('science/chart-saved', 9, 190, {
         version: 1,
         chart: chart({
@@ -826,7 +911,7 @@ describe('strict Science fold', () => {
         : candidate), /start time/],
       ['concurrent run', [
         ...legalEvents().slice(0, 5),
-        event('tool/call', 5, 150, { callId: secondCall }),
+        toolCall(5, 150, secondCall, 'run_python'),
         event('science/run-started', 6, 160, {
           version: 1,
           run: runStarted({
@@ -853,7 +938,7 @@ describe('strict Science fold', () => {
       ], /prior mode binding/],
       ['chart from running run', [
         ...legalEvents().slice(0, 5),
-        event('tool/call', 5, 150, { callId: CHART_CALL_ID }),
+        toolCall(5, 150, CHART_CALL_ID, 'save_chart'),
         event('science/chart-saved', 6, 160, {
           version: 1,
           chart: chart({ createdAt: 159 }),
@@ -888,7 +973,7 @@ describe('strict Science fold', () => {
       ['chart version skips', secondChart({ version: 3 }), /advance contiguously/],
       ['chart version moves creation time backwards', [
         ...legalEvents().slice(0, 8),
-        event('tool/call', 8, 168, { callId: secondCall }),
+        toolCall(8, 168, secondCall, 'save_chart'),
         event('science/chart-saved', 9, 190, {
           version: 1,
           chart: chart({
@@ -909,7 +994,7 @@ describe('strict Science fold', () => {
         : candidate), /publication time/],
       ['outcome time regresses', [
         ...legalEvents(),
-        event('tool/call', 10, 185, { callId: CallId('call-outcome-2') }),
+        toolCall(10, 185, CallId('call-outcome-2'), 'publish_outcome'),
         event('science/outcome-published', 11, 190, {
           version: 1,
           outcome: outcome({
@@ -937,7 +1022,7 @@ describe('strict Science fold', () => {
         }),
         event('request/header', 2, 120, {}),
         event('assistant/message', 3, 130, {}),
-        event('tool/call', 4, 135, { callId: OUTCOME_CALL_ID }),
+        toolCall(4, 135, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 5, 140, {
           version: 1,
           outcome: outcome({
@@ -954,7 +1039,7 @@ describe('strict Science fold', () => {
         : candidate), /not a successful prior run/],
       ['outcome run evidence not terminal', [
         ...legalEvents().slice(0, 5),
-        event('tool/call', 5, 145, { callId: OUTCOME_CALL_ID }),
+        toolCall(5, 145, OUTCOME_CALL_ID, 'publish_outcome'),
         event('science/outcome-published', 6, 150, {
           version: 1,
           outcome: outcome({
@@ -995,7 +1080,7 @@ describe('strict Science fold', () => {
         }),
       }),
       event('request/header', 3, 4, {}),
-      event('tool/call', 4, 5, { callId: RUN_CALL_ID }),
+      toolCall(4, 5, RUN_CALL_ID, 'run_python'),
       event('turn/start', 5, 6, {}),
     ]
     for (const supportingEvent of supportingEvents) applyScienceEvent(supportingState, supportingEvent)
@@ -1005,8 +1090,16 @@ describe('strict Science fold', () => {
       { seq: 2, time: 3 },
     ])
     expect(supportingState.requestHeaders).toEqual([{ seq: 3, time: 4 }])
-    expect(supportingState.toolCalls).toEqual([{ seq: 4, time: 5, callId: RUN_CALL_ID }])
+    expect(supportingState.toolCalls).toEqual([{
+      seq: 4,
+      time: 5,
+      callId: RUN_CALL_ID,
+      turn: 1,
+      step: 1,
+      name: 'run_python',
+    }])
     expect(supportingState.toolResults).toEqual([{ seq: 2, time: 3, callId: RUN_CALL_ID }])
+    expect(supportingState.settledToolCallSeqs).toEqual([])
     expect(supportingState.consumedToolCallSeqs).toEqual([])
 
     const postModeStep = emptyScienceFoldState()
@@ -1017,7 +1110,7 @@ describe('strict Science fold', () => {
     const withMessageEvidence = [
       ...legalEvents().slice(0, 8),
       event('assistant/message', 8, 175, {}),
-      event('tool/call', 9, 176, { callId: OUTCOME_CALL_ID }),
+      toolCall(9, 176, OUTCOME_CALL_ID, 'publish_outcome'),
       event('science/outcome-published', 10, 180, {
         version: 1,
         outcome: outcome({ evidence: [
@@ -1053,10 +1146,10 @@ describe('strict Science fold', () => {
         environment: secondEnvironment,
       }),
       event('request/header', 3, 130, {}),
-      event('tool/call', 4, 135, { callId: RUN_CALL_ID }),
+      toolCall(4, 135, RUN_CALL_ID, 'run_python'),
       event('science/run-started', 5, 140, { version: 1, run: runOnSecondEnvironment }),
       event('science/run-finished', 6, 150, { version: 1, run: terminalOnSecondEnvironment }),
-      event('tool/call', 7, 155, { callId: OUTCOME_CALL_ID }),
+      toolCall(7, 155, OUTCOME_CALL_ID, 'publish_outcome'),
       event('science/outcome-published', 8, 160, {
         version: 1,
         outcome: outcome({
@@ -1074,7 +1167,7 @@ describe('strict Science fold', () => {
 
     const chartVersionTwo = [
       ...legalEvents().slice(0, 8),
-      event('tool/call', 8, 180, { callId: CallId('call-chart-2') }),
+      toolCall(8, 180, CallId('call-chart-2'), 'save_chart'),
       event('science/chart-saved', 9, 190, {
         version: 1,
         chart: chart({
@@ -1119,7 +1212,7 @@ describe('strict Science fold', () => {
 
     const twoRuns = [
       ...legalEvents().slice(0, 6),
-      event('tool/call', 6, 160, { callId: CallId('call-run-2') }),
+      toolCall(6, 160, CallId('call-run-2'), 'run_python'),
       event('science/run-started', 7, 170, {
         version: 1,
         run: runStarted({

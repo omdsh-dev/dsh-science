@@ -8,7 +8,10 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as ScienceSessionDomain from '../src/index.ts'
 import {
   applyScienceProjection,
+  applyScienceProjectionState,
+  emptyScienceProjectionState,
   scienceProjectionSchema,
+  scienceProjectionStateSchema,
   ScienceChartId,
   ScienceEnvironmentProfileId,
   ScienceRunId,
@@ -19,6 +22,7 @@ import type {
   ScienceEnvironmentBinding,
   ScienceOutcomePublication,
   ScienceProjection,
+  ScienceProjectionState,
   ScienceRunStarted,
   ScienceRunTerminal,
 } from '../src/index.ts'
@@ -188,6 +192,13 @@ function outcomeEvent(
 
 function project(events: readonly SessionEvent[]): ScienceProjection | null {
   return events.reduce<ScienceProjection | null>(applyScienceProjection, null)
+}
+
+function projectState(events: readonly SessionEvent[]): ScienceProjectionState {
+  return events.reduce<ScienceProjectionState>(
+    applyScienceProjectionState,
+    emptyScienceProjectionState(),
+  )
 }
 
 const scienceValue = (ctx: Context, session: Session): ScienceProjection | null | undefined =>
@@ -368,9 +379,13 @@ describe('Science projection', () => {
     }, 5, 160)
     expect(applyScienceProjection(runningState, invalidAfterRun)).not.toBe(runningState)
 
-    const rEnvironment = environmentEvent({
-      python: undefined,
-      r: { ...python, language: 'r' },
+    const environmentData = projectionEvents()[1]!.data as unknown as {
+      environment: ScienceEnvironmentBinding
+    }
+    const { python: _python, ...withoutPython } = environmentData.environment
+    const rEnvironment = event('science/environment-bound', 1, 110, {
+      version: 1,
+      environment: { ...withoutPython, r: { ...python, language: 'r' } },
     })
     const rState = project([events[0]!, rEnvironment])!
     expect(applyScienceProjection(rState, startedEvent({ language: 'r' }))).not.toBe(rState)
@@ -441,6 +456,364 @@ describe('Science projection', () => {
     expect(mixed.runs.map(run => run.status)).toEqual(['success', 'interrupted'])
   })
 
+  it('rejects checkpoint witnesses that cannot replay to the public value', () => {
+    const events = projectionEvents()
+    const call = (
+      seq: number,
+      time: number,
+      callId: ReturnType<typeof CallId>,
+      name: string,
+      turn = 1,
+      step = 1,
+    ): SessionEvent => event('tool/call', seq, time, {
+      turn,
+      step,
+      callId,
+      name,
+      arguments: '{}',
+    })
+    const result = (
+      seq: number,
+      time: number,
+      callId: ReturnType<typeof CallId>,
+    ): SessionEvent => event('tool/result', seq, time, {
+      turn: 1,
+      step: 1,
+      message: { source: { callId } },
+    })
+
+    const terminalEvents = [
+      events[0]!,
+      events[1]!,
+      event('request/header', 2, 120, {}),
+      call(3, 130, RUN_CALL_ID, 'run_python'),
+      events[2]!,
+      events[3]!,
+    ]
+    const emptyState = emptyScienceProjectionState()
+    const headerOnlyState = projectState([event('request/header', 0, 90, {})])
+    const modeState = projectState(events.slice(0, 1))
+    const environmentState = projectState(events.slice(0, 2))
+    const runningState = projectState(terminalEvents.slice(0, 5))
+    const terminalState = projectState(terminalEvents)
+    const interruptedState = projectState([
+      ...terminalEvents.slice(0, 5),
+      event('session/end-seed', 5, 150, {}),
+    ])
+    const chartedState = projectState([
+      ...terminalEvents,
+      call(6, 160, CHART_CALL_ID, 'save_chart'),
+      events[4]!,
+    ])
+    const completeState = projectState([
+      ...terminalEvents,
+      call(6, 160, CHART_CALL_ID, 'save_chart'),
+      events[4]!,
+      call(8, 175, OUTCOME_CALL_ID, 'publish_outcome'),
+      events[5]!,
+    ])
+    const messageOnlyState = projectState([
+      events[0]!,
+      event('request/header', 1, 110, {}),
+      event('assistant/message', 2, 120, {}),
+      call(3, 125, OUTCOME_CALL_ID, 'publish_outcome'),
+      outcomeEvent({
+        evidence: [{ kind: 'message', seq: 2 }],
+        requestHeaderSeq: 1,
+        environmentRevisions: [],
+        publishedAt: 129,
+      }, 4, 130),
+    ])
+    const resultCallId = CallId('call-result')
+    const toolMessageState = projectState([
+      events[0]!,
+      event('request/header', 1, 110, {}),
+      call(2, 115, resultCallId, 'bash'),
+      result(3, 120, resultCallId),
+      call(4, 125, OUTCOME_CALL_ID, 'publish_outcome'),
+      outcomeEvent({
+        evidence: [{ kind: 'message', seq: 3 }],
+        requestHeaderSeq: 1,
+        environmentRevisions: [],
+        publishedAt: 129,
+      }, 5, 130),
+    ])
+    const supportState = projectState([
+      events[0]!,
+      event('step/start', 1, 105, { turn: 2, step: 1 }),
+      event('user/message', 2, 110, {}),
+      event('assistant/message', 3, 115, {}),
+      event('request/header', 4, 120, {}),
+      call(5, 125, resultCallId, 'bash', 2, 1),
+      event('step/end', 6, 130, { turn: 2, step: 1 }),
+      result(7, 135, resultCallId),
+    ])
+    const stepGuardState = projectState([
+      events[0]!,
+      event('request/header', 1, 110, {}),
+      event('assistant/message', 2, 120, {}),
+      call(3, 125, OUTCOME_CALL_ID, 'publish_outcome'),
+      event('step/end', 4, 127, { turn: 2, step: 1 }),
+      outcomeEvent({
+        evidence: [{ kind: 'message', seq: 2 }],
+        requestHeaderSeq: 1,
+        environmentRevisions: [],
+        publishedAt: 129,
+      }, 5, 130),
+    ])
+    const gappedTerminalState = projectState([
+      ...terminalEvents.slice(0, 4),
+      event('turn/start', 4, 135, { turn: 1 }),
+      startedEvent({}, 5, 140),
+      finishedEvent({}, 6, 150),
+    ])
+
+    for (const [name, state] of [
+      ['empty', emptyState],
+      ['header only', headerOnlyState],
+      ['mode', modeState],
+      ['environment', environmentState],
+      ['running', runningState],
+      ['terminal', terminalState],
+      ['interrupted', interruptedState],
+      ['charted', chartedState],
+      ['complete', completeState],
+      ['message only', messageOnlyState],
+      ['tool-result message', toolMessageState],
+      ['support facts', supportState],
+      ['unrelated step end', stepGuardState],
+      ['gapped terminal', gappedTerminalState],
+    ] satisfies Array<readonly [string, ScienceProjectionState]>) {
+      expect(scienceProjectionStateSchema.safeParse(state).success, name).toBe(true)
+    }
+
+    expect(applyScienceProjectionState(
+      completeState,
+      event('session/end-seed', 10, 190, {}),
+    )).toBe(completeState)
+    expect(applyScienceProjectionState(
+      completeState,
+      event('turn/start', 10, 190, { turn: 2 }),
+    )).toBe(completeState)
+    expect(applyScienceProjectionState(
+      completeState,
+      event('science/mode-bound', 10, 190, events[0]!.data),
+    )).toBe(completeState)
+    expect(applyScienceProjectionState(completeState, {
+      ...event('science/mode-bound', 10, 190, events[0]!.data),
+      ignorable: true,
+    })).toBe(completeState)
+
+    const headerTampered: ScienceProjectionState = {
+      ...terminalState,
+      value: {
+        ...terminalState.value!,
+        runs: [{ ...terminalState.value!.runs[0]!, requestHeaderSeq: 3 }],
+      },
+    }
+    expect(scienceProjectionSchema.safeParse(headerTampered.value).success).toBe(true)
+    expect(scienceProjectionStateSchema.safeParse(headerTampered).success).toBe(false)
+
+    const replaceWitness = (
+      state: ScienceProjectionState,
+      type: string,
+      change: (candidate: ScienceProjectionState['witness'][number]) =>
+      ScienceProjectionState['witness'][number],
+    ): ScienceProjectionState => ({
+      ...state,
+      witness: state.witness.map(candidate => candidate.type === type ? change(candidate) : candidate),
+    })
+    const callData = (
+      candidate: ScienceProjectionState['witness'][number],
+    ): { turn: number; step: number; callId: ReturnType<typeof CallId>; name: string } =>
+      candidate.data as {
+        turn: number
+        step: number
+        callId: ReturnType<typeof CallId>
+        name: string
+      }
+
+    const invalidStates: Array<readonly [string, unknown]> = [
+      ['undefined state', undefined],
+      ['missing state keys', {}],
+      ['extra state key', { ...completeState, unexpected: true }],
+      ['invalid public value', { ...completeState, value: undefined }],
+      ['well-formed but invalid public value', {
+        ...completeState,
+        value: { ...completeState.value!, lastScienceEventSeq: 1 },
+      }],
+      ['non-array witness', { ...completeState, witness: null }],
+      ['malformed witness event', { ...completeState, witness: [null] }],
+      ['missing witness event key', {
+        ...completeState,
+        witness: [{ seq: 0, time: 100, type: 'science/mode-bound' }],
+      }],
+      ['extra witness event key', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, unexpected: true }
+          : candidate),
+      }],
+      ['non-string witness type', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, type: 1 }
+          : candidate),
+      }],
+      ['required Science witness marked ignorable', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, ignorable: true }
+          : candidate),
+      }],
+      ['negative witness seq', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, seq: -1 }
+          : candidate),
+      }],
+      ['unsafe witness seq', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, seq: Number.MAX_SAFE_INTEGER + 1 }
+          : candidate),
+      }],
+      ['unsafe witness time', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, time: Number.MAX_SAFE_INTEGER + 1 }
+          : candidate),
+      }],
+      ['unknown witness type', {
+        ...completeState,
+        witness: completeState.witness.map((candidate, index) => index === 0
+          ? { ...candidate, type: 'turn/start' }
+          : candidate),
+      }],
+      ['non-canonical request data', replaceWitness(
+        terminalState,
+        'request/header',
+        candidate => ({ ...candidate, data: { provider: 'secret' } }),
+      )],
+      ['non-canonical call data', replaceWitness(
+        terminalState,
+        'tool/call',
+        candidate => ({ ...candidate, data: { ...callData(candidate), arguments: '{}' } }),
+      )],
+      ['non-canonical step-end data', replaceWitness(
+        supportState,
+        'step/end',
+        candidate => ({ ...candidate, data: { turn: 2, step: 1, reason: 'done' } }),
+      )],
+      ['non-canonical tool-result data', replaceWitness(
+        toolMessageState,
+        'tool/result',
+        candidate => ({
+          ...candidate,
+          data: { message: { source: { callId: resultCallId }, content: [] } },
+        }),
+      )],
+      ['malformed step-end data', replaceWitness(
+        supportState,
+        'step/end',
+        candidate => ({ ...candidate, data: { turn: '2', step: 1 } }),
+      )],
+      ['malformed tool-call data', replaceWitness(
+        supportState,
+        'tool/call',
+        candidate => ({ ...candidate, data: { ...callData(candidate), name: 1 } }),
+      )],
+      ['malformed tool-result data', replaceWitness(
+        supportState,
+        'tool/result',
+        candidate => ({ ...candidate, data: { message: { source: { callId: 1 } } } }),
+      )],
+      ['deleted authorizing call', {
+        ...terminalState,
+        witness: terminalState.witness.filter(candidate => candidate.type !== 'tool/call'),
+      }],
+      ['authorizing call id changed', replaceWitness(
+        terminalState,
+        'tool/call',
+        candidate => ({
+          ...candidate,
+          data: { ...callData(candidate), callId: CallId('call-other') },
+        }),
+      )],
+      ['authorizing call name changed', replaceWitness(
+        terminalState,
+        'tool/call',
+        candidate => ({ ...candidate, data: { ...callData(candidate), name: 'bash' } }),
+      )],
+      ['authorizing call time changed', replaceWitness(
+        terminalState,
+        'tool/call',
+        candidate => ({ ...candidate, time: 140 }),
+      )],
+      ['authorizing step ended', {
+        ...gappedTerminalState,
+        witness: [
+          ...gappedTerminalState.witness.slice(0, 4),
+          {
+            seq: 4,
+            time: 135,
+            type: 'step/end',
+            data: { turn: 1, step: 1 },
+          },
+          ...gappedTerminalState.witness.slice(4),
+        ],
+      }],
+      ['step-end identity changed', replaceWitness(
+        stepGuardState,
+        'step/end',
+        candidate => ({ ...candidate, data: { turn: 1, step: 1 } }),
+      )],
+      ['message event type changed', replaceWitness(
+        messageOnlyState,
+        'assistant/message',
+        candidate => ({ ...candidate, type: 'request/header' }),
+      )],
+      ['message event time changed', replaceWitness(
+        messageOnlyState,
+        'assistant/message',
+        candidate => ({ ...candidate, time: 130 }),
+      )],
+      ['witness order changed', {
+        ...terminalState,
+        witness: [
+          terminalState.witness[1]!,
+          terminalState.witness[0]!,
+          ...terminalState.witness.slice(2),
+        ],
+      }],
+      ['witness seq duplicated', {
+        ...terminalState,
+        witness: terminalState.witness.map((candidate, index) => index === 1
+          ? { ...candidate, seq: terminalState.witness[0]!.seq }
+          : candidate),
+      }],
+      ['irrelevant seed boundary retained', {
+        ...modeState,
+        witness: [
+          ...modeState.witness,
+          { seq: 1, time: 110, type: 'session/end-seed', data: {} },
+        ],
+      }],
+      ['public value differs from replay', {
+        ...completeState,
+        value: {
+          ...completeState.value!,
+          outcome: {
+            ...completeState.value!.outcome!,
+            requestHeaderSeq: completeState.value!.outcome!.requestHeaderSeq + 1,
+          },
+        },
+      }],
+    ]
+    for (const [name, state] of invalidStates) {
+      expect(scienceProjectionStateSchema.safeParse(state).success, name).toBe(false)
+    }
+  })
   it('rejects corrupted projection values at the wire schema', () => {
     const events = projectionEvents()
     const modeState = project(events.slice(0, 1))!
@@ -459,8 +832,7 @@ describe('Science projection', () => {
       enumerable: true,
       get: () => {
         statusReads += 1
-        if (statusReads === 1) return 'success'
-        return statusReads === 2 ? 'interrupted' : 'running'
+        return statusReads <= 3 ? 'interrupted' : 'running'
       },
     })
 
@@ -505,11 +877,11 @@ describe('Science projection', () => {
     const currentEnvironment = state.environment!
     const currentPython = currentEnvironment.python!
     const successfulRun = state.runs[0]! as ScienceRunTerminal
+    const { python: _currentPython, ...currentEnvironmentWithoutPython } = currentEnvironment
     const rRunningState = {
       ...runningState,
       environment: {
-        ...currentEnvironment,
-        python: undefined,
+        ...currentEnvironmentWithoutPython,
         r: { ...currentPython, language: 'r' },
       },
       runs: [{ ...runningState.runs[0], language: 'r' }],
@@ -642,6 +1014,7 @@ describe('Science projection', () => {
       mixedEnvironmentRuns,
       { ...state, runs: {} },
       { ...state, runs: [null] },
+      { ...state, runs: [{}] },
       { ...state, runs: [{ ...runningState.runs[0], unexpected: true }] },
       { ...state, runs: [{ ...state.runs[0], status: 'unknown' }] },
       { ...state, runs: [{ status: 'interrupted' }] },

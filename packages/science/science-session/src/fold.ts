@@ -413,6 +413,9 @@ interface IndexedToolCall {
   readonly seq: number
   readonly time: number
   readonly callId: string
+  readonly turn: number
+  readonly step: number
+  readonly name: string
 }
 
 /** Internal index entry for a supporting Session fact. */
@@ -454,6 +457,7 @@ export interface ScienceFoldState {
   requestHeaders: IndexedSessionFact[]
   toolCalls: IndexedToolCall[]
   toolResults: IndexedToolResult[]
+  settledToolCallSeqs: number[]
   consumedToolCallSeqs: number[]
   messageFacts: IndexedSessionFact[]
   runFacts: IndexedRunFact[]
@@ -479,6 +483,7 @@ export function emptyScienceFoldState(): ScienceFoldState {
     requestHeaders: [],
     toolCalls: [],
     toolResults: [],
+    settledToolCallSeqs: [],
     consumedToolCallSeqs: [],
     messageFacts: [],
     runFacts: [],
@@ -506,6 +511,7 @@ export function cloneScienceFoldState(state: ScienceFoldState): ScienceFoldState
     requestHeaders: [...state.requestHeaders],
     toolCalls: [...state.toolCalls],
     toolResults: [...state.toolResults],
+    settledToolCallSeqs: [...state.settledToolCallSeqs],
     consumedToolCallSeqs: [...state.consumedToolCallSeqs],
     messageFacts: [...state.messageFacts],
     runFacts: [...state.runFacts],
@@ -532,6 +538,7 @@ function requireToolCall(
   seq: number,
   callId: string,
   requestHeaderSeq: number,
+  expectedToolNames: readonly string[],
 ): IndexedToolCall {
   const allMatches = state.toolCalls.filter(call => call.callId === callId)
   const matches = allMatches.filter(call => call.seq > (state.modeBoundSeq ?? Number.MAX_SAFE_INTEGER)
@@ -541,12 +548,13 @@ function requireToolCall(
   if (call === undefined) {
     throw new Error(`toolCallId ${JSON.stringify(callId)} does not identify one call after its cited request/header`)
   }
+  if (!expectedToolNames.includes(call.name)) {
+    throw new Error(`toolCallId ${JSON.stringify(callId)} names ${JSON.stringify(call.name)}, expected ${expectedToolNames.join(' or ')}`)
+  }
   if (state.consumedToolCallSeqs.includes(call.seq)) {
     throw new Error(`toolCallId ${JSON.stringify(callId)} was already consumed by a Science fact`)
   }
-  if (state.toolResults.some(result => result.callId === callId
-    && result.seq > call.seq
-    && result.seq < seq)) {
+  if (state.settledToolCallSeqs.includes(call.seq)) {
     throw new Error(`toolCallId ${JSON.stringify(callId)} was already settled before its Science fact`)
   }
   return call
@@ -635,7 +643,13 @@ function applyDomainEvent(state: ScienceFoldState, event: DecodedScienceDomainEv
         throw new Error('Science run does not match an available environment binding')
       }
       const requestHeader = requireRequestHeader(state, run.requestHeaderSeq)
-      const toolCall = requireToolCall(state, event.seq, run.toolCallId, run.requestHeaderSeq)
+      const toolCall = requireToolCall(
+        state,
+        event.seq,
+        run.toolCallId,
+        run.requestHeaderSeq,
+        run.language === 'python' ? ['run_python'] : ['run_r'],
+      )
       const priorRunFact = state.runFacts.at(-1)
       if (run.startedAt < environment.validatedAt
         || run.startedAt < requestHeader.time
@@ -690,7 +704,13 @@ function applyDomainEvent(state: ScienceFoldState, event: DecodedScienceDomainEv
         throw new Error('Science chart must reference a successful prior run')
       }
       const requestHeader = requireRequestHeader(state, chart.requestHeaderSeq)
-      const toolCall = requireToolCall(state, event.seq, chart.toolCallId, chart.requestHeaderSeq)
+      const toolCall = requireToolCall(
+        state,
+        event.seq,
+        chart.toolCallId,
+        chart.requestHeaderSeq,
+        ['save_chart'],
+      )
       if (chart.environmentRevision !== source.environmentRevision
         || chart.environmentFingerprint !== source.environmentFingerprint) {
         throw new Error('Science chart environment provenance must match its source run')
@@ -744,7 +764,13 @@ function applyDomainEvent(state: ScienceFoldState, event: DecodedScienceDomainEv
         throw new Error('Science outcome publication time is not monotonic')
       }
       const requestHeader = requireRequestHeader(state, outcome.requestHeaderSeq)
-      const toolCall = requireToolCall(state, event.seq, outcome.toolCallId, outcome.requestHeaderSeq)
+      const toolCall = requireToolCall(
+        state,
+        event.seq,
+        outcome.toolCallId,
+        outcome.requestHeaderSeq,
+        ['publish_outcome'],
+      )
       if (outcome.publishedAt < requestHeader.time || outcome.publishedAt < toolCall.time) {
         throw new Error('Science outcome publication time precedes its authorizing facts')
       }
@@ -849,11 +875,26 @@ export function applyScienceEvent(state: ScienceFoldState, event: SessionEvent):
       case 'step/start':
         if (state.mode === undefined) state.preModeStepStarted = true
         break
+      case 'step/end':
+        for (const call of state.toolCalls) {
+          if (call.turn === event.data.turn && call.step === event.data.step
+            && !state.settledToolCallSeqs.includes(call.seq)) {
+            state.settledToolCallSeqs.push(call.seq)
+          }
+        }
+        break
       case 'request/header':
         state.requestHeaders.push({ seq: event.seq, time: event.time })
         break
       case 'tool/call':
-        state.toolCalls.push({ seq: event.seq, time: event.time, callId: event.data.callId })
+        state.toolCalls.push({
+          seq: event.seq,
+          time: event.time,
+          callId: event.data.callId,
+          turn: event.data.turn,
+          step: event.data.step,
+          name: event.data.name,
+        })
         break
       case 'user/message':
       case 'assistant/message':
@@ -866,6 +907,12 @@ export function applyScienceEvent(state: ScienceFoldState, event: SessionEvent):
           time: event.time,
           callId: event.data.message.source.callId,
         })
+        for (const call of state.toolCalls) {
+          if (call.callId === event.data.message.source.callId
+            && !state.settledToolCallSeqs.includes(call.seq)) {
+            state.settledToolCallSeqs.push(call.seq)
+          }
+        }
         break
       case 'session/end-seed':
         applyEndSeed(state, event)

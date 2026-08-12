@@ -7,6 +7,7 @@
 
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { CallId } from '@deepseek-ai/dsh-llm'
+import type { JsonValue } from '@deepseek-ai/dsh-session/types'
 import type {
   ScienceChartId,
   ScienceEnvironmentProfileId,
@@ -258,6 +259,26 @@ export interface ScienceProjection {
   readonly metrics: ScienceProjectionMetrics
   /** Sequence of the latest event that changed Science projection state. */
   readonly lastScienceEventSeq: number
+}
+
+/** One redacted event retained as a private checkpoint replay witness. */
+export interface ScienceProjectionWitnessEvent {
+  /** Original Session sequence. */
+  readonly seq: number
+  /** Original Session event time. */
+  readonly time: number
+  /** Science-relevant event type. */
+  readonly type: string
+  /** Minimal data consumed by the strict Science fold. */
+  readonly data: JsonValue
+}
+
+/** Internal plain-JSON state cached for the Science projection unit. */
+export interface ScienceProjectionState {
+  /** Client-safe value served by the unit. */
+  readonly value: ScienceProjection | null
+  /** Sparse redacted facts that re-prove this value through strict replay. */
+  readonly witness: readonly ScienceProjectionWitnessEvent[]
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {

@@ -9,8 +9,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { SCIENCE_PROJECTION_STATE_VERSION } from './ids.ts'
-import { applyScienceProjection, scienceProjectionSchema } from './projection.ts'
-import type { ScienceProjection } from './types.ts'
+import {
+  applyScienceProjectionState,
+  emptyScienceProjectionState,
+  scienceProjectionSchema,
+  scienceProjectionStateSchema,
+} from './projection.ts'
+import type { ScienceProjectionState } from './types.ts'
 
 export * from './types.ts'
 export * from './domain.ts'
@@ -26,12 +31,15 @@ export const inject: readonly string[] = []
 /** Register the Science projection only when the host composes its registry. */
 export function apply(ctx: Context): void {
   ctx.inject(['sessionProjections'], (projectionCtx) => {
-    projectionCtx.sessionProjections.register<'science', ScienceProjection | null>({
+    projectionCtx.sessionProjections.register<'science', ScienceProjectionState>({
       key: 'science',
       schema: scienceProjectionSchema,
-      init: () => null,
-      apply: applyScienceProjection,
-      view: state => state,
+      init: emptyScienceProjectionState,
+      apply: applyScienceProjectionState,
+      view: (state) => {
+        scienceProjectionStateSchema.parse(state)
+        return state.value
+      },
       stateVersion: SCIENCE_PROJECTION_STATE_VERSION,
     })
   })

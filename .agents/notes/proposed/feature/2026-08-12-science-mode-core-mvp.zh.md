@@ -45,7 +45,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 
 ### 适用性与 mode
 
-Host 注册一个 `science` projection 单元。在第一条有效 `science/mode-bound` 事件前，其值为 `null`，Standard 会话也如此；缺少 projection key 表示没有组合 Science 包。只有 `session.header.agentPreset === 'science'` 时才能写入 `science/mode-bound`，且只能出现一次；它必须早于第一条 step、request-header 或 tool-call fact，并记录固定 mode ID、preset 与人工维护的 mode revision。每个 run、chart 或 Outcome 的 `requestHeaderSeq` 都指向模式绑定后的最新 header，关联其 logged prompt 与安全的提供方／模型 identity；每项记录还必须指向该 header 之后一项唯一且尚未结算的模型 tool call。一个 tool call 只授权一项 Science fact，消费或结算后不得复用。
+Host 注册一个 `science` projection 单元。在第一条有效 `science/mode-bound` 事件前，其值为 `null`，Standard 会话也如此；缺少 projection key 表示没有组合 Science 包。只有 `session.header.agentPreset === 'science'` 时才能写入 `science/mode-bound`，且只能出现一次；它必须早于第一条 step、request-header 或 tool-call fact，并记录固定 mode ID、preset 与人工维护的 mode revision。每个 run、chart 或 Outcome 的 `requestHeaderSeq` 都指向模式绑定后的最新 header，关联其 logged prompt 与安全的提供方／模型 identity；每项记录还必须指向该 header 之后一项唯一且尚未结算的模型 tool call。一个 tool call 只授权一项 Science fact，消费或结算后不得复用。该 call 的 result 或其所属 step 的结束都会将它结算。
 
 ### 环境
 
@@ -55,13 +55,13 @@ Host 注册一个 `science` projection 单元。在第一条有效 `science/mode
 
 `ScienceRunId`、`ScienceEnvironmentProfileId`、`ScienceChartId` 与 `ScienceScratchKey` 是该包拥有的 branded string。数值型 environment、chart 与 Outcome revision 是正数连续计数器，不是 opaque ID。已有的 `SessionId`、`CallId` 与 `AttachmentId` 类型继续由当前包持有。
 
-run start 记录语言、tool call、request-header seq、environment revision 与 fingerprint、开始时间、代码 digest、scratch identity，以及相对 `runs/<run-id>/` reference。所引用的 tool call 已经标识其 turn 与 step，因此 Science record 不重复保存。run finish 携带完整的 terminal run 值。严格 fold 会拒绝 immutable start 字段不同、时间早于 start，或 status 不是 `success`、`failed`、`timed-out`、`cancelled` 的任何 finish。
+run start 记录语言、tool call、request-header seq、environment revision 与 fingerprint、开始时间、代码 digest、scratch identity，以及相对 `runs/<run-id>/` reference。Python 与 R start 分别要求 pending 的 `run_python` 与 `run_r` call。所引用的 tool call 已经标识其 turn 与 step，因此 Science record 不重复保存。run finish 携带完整的 terminal run 值。严格 fold 会拒绝 immutable start 字段不同、时间早于 start，或 status 不是 `success`、`failed`、`timed-out`、`cancelled` 的任何 finish。
 
 只有 `session/end-seed` 能派生 `interrupted`：在每个 marker 处，projection 把 marker 前仍在运行的 run 替换为 interrupted view。它不会追加另一条 execution event。普通 aborted turn、caller cancellation 或服务 dispose 必须在运行时阶段让 owned process tree 结算，并追加 status 为 `cancelled` 的 `science/run-finished`。
 
 ### 图表版本
 
-图表 record 包含稳定 chart ID、规范化 logical name、正数连续 version、不可变 `ImageAttachmentRef`、title 与可选 caption、成功的来源 run、tool call、request-header seq、environment revision 与 fingerprint，以及创建时间。事件 envelope 提供该记录的 sequence。Phase 1 只接受 `image/png`，且来源必须是同一 folded log 中已有的成功 run；version 创建时间不得倒退。未来若要允许失败 run 的诊断 override，需要新的决策；MVP 不自行推断。
+图表 record 包含稳定 chart ID、规范化 logical name、正数连续 version、不可变 `ImageAttachmentRef`、title 与可选 caption、成功的来源 run、pending 的 `save_chart` call、request-header seq、environment revision 与 fingerprint，以及创建时间。事件 envelope 提供该记录的 sequence。Phase 1 只接受 `image/png`，且来源必须是同一 folded log 中已有的成功 run；version 创建时间不得倒退。未来若要允许失败 run 的诊断 override，需要新的决策；MVP 不自行推断。
 
 ### Outcome
 
@@ -86,7 +86,7 @@ Outcome 与 Goal 是相互独立的领域。Outcome operation 绝不读取或修
 
 纯同步 strict fold 是 invariant check 与大声失败 replay test 的权威。invariant companion 在 `internal/dispatch` 上暂存该 fold，因此违规会在 `session/event` commit 前拒绝。projection apply function 复用严格 payload decoder，并独立执行本地 projection transition；对 unrelated 或 malformed event 返回同一 state reference 以维持可用性。测试要求 strict fold 与 projection 对每一条有效 live/cold log 产生等价的 Science value。
 
-`science` projection registration 从 `stateVersion: 1` 开始。其值包含 mode、当前 environment、完整 run summary、chart-version metadata、最新 Outcome、只从这些事实派生的 conversation metrics，以及 `lastScienceEventSeq`。binary attachment data、code、stdout、stderr、log 与 Host absolute attachment path 都不进入 projection。若 state structure 或 fold semantics 变化，则递增 registration version，而不在 value 内另放 version 字段。
+`science` projection registration 从 `stateVersion: 1` 开始。公开值包含 mode、当前 environment、完整 run summary、chart-version metadata、最新 Outcome、只从这些事实派生的 conversation metrics，以及 `lastScienceEventSeq`。私有 checkpoint state 还保留一份稀疏、脱敏的回放见证：event sequence、time 与 type，完整 Science payload，以及 supporting Core event 中严格回放所需的 call identity、tool name、step coordinate 或 evidence identity。request-header body、tool argument 与 message content 都会省略。只有严格回放该见证能派生出完全相同的公开值时，恢复的 checkpoint 才会被提供。binary attachment data、code、stdout、stderr、log 与 Host absolute attachment path 都不进入公开 projection。若私有 state structure 或 fold semantics 变化，则递增 registration version，而不在公开 value 内另放 version 字段。
 
 ## Phase 1 append 边界
 

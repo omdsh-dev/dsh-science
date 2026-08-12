@@ -8,7 +8,7 @@ The Science Session Domain owns compact, required-on-read facts and their determ
 
 `ScienceRunId`, `ScienceEnvironmentProfileId`, `ScienceChartId`, and `ScienceScratchKey` are [branded identifiers](core.md#branded-ids). A Session may contain Science events only when `SessionHeader.agentPreset` is `science`. The projection is `null` before the one mode binding; an absent `science` key means the package was not composed.
 
-The mode event records only stable mode facts and must precede the first step, request header, or tool call. Run, chart, and Outcome records refer backward to the latest post-mode `request/header` that owns prompt and model provenance, plus one unique still-pending tool call that anchors the model action.
+The mode event records only stable mode facts and must precede the first step, request header, or tool call. Run, chart, and Outcome records refer backward to the latest post-mode `request/header` that owns prompt and model provenance, plus one unique still-pending tool call that anchors the model action. A result or owning `step/end` settles a call; Python and R runs, charts, and Outcomes respectively require `run_python` or `run_r`, `save_chart`, and `publish_outcome`.
 
 ```ts type-equiv
 /** The preset-bound Science mode identity recorded once per session. */
@@ -50,7 +50,7 @@ interface ScienceEnvironmentBinding {
 
 ## Runs, charts, and Outcome
 
-A run start is a complete immutable execution identity. A finish repeats those fields and adds one terminal state. `interrupted` is never a finish payload: replay derives it only when `session/end-seed` closes a still-running record. Chart versions cite a successful run and immutable PNG attachment. Outcome revisions cite prior runs, chart versions, or messages without reading or mutating Goal state. Each tool call authorizes exactly one Science fact, and payload timestamps cannot precede their supporting facts.
+A run start is a complete immutable execution identity. A finish repeats those fields and adds one terminal state. `interrupted` is never a finish payload: replay derives it only when `session/end-seed` closes a still-running record. Chart versions cite a successful run and immutable PNG attachment. Outcome revisions cite prior runs, chart versions, or messages without reading or mutating Goal state. Each tool call authorizes exactly one Science fact, and payload timestamps cannot precede their supporting facts. The public projection remains metadata-only; its private checkpoint keeps a sparse redacted witness and accepts a restored value only when strict replay of that witness reproduces it exactly.
 
 ```ts type-equiv
 /** Run state served by the Science projection. */

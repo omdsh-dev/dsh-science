@@ -1,13 +1,17 @@
 /** Fail-soft plain-JSON Science projection mathematics. */
 
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { isJsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue, SessionEvent } from '@deepseek-ai/dsh-session'
+import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import type { ZodType } from 'zod'
-import { decodeScienceChart, decodeScienceDomainEvent, decodeScienceEnvironment, decodeScienceMode, decodeScienceOutcome, decodeScienceRunStarted, decodeScienceRunTerminal } from './fold.ts'
+import { applyScienceEvent, decodeScienceChart, decodeScienceDomainEvent, decodeScienceEnvironment, decodeScienceMode, decodeScienceOutcome, decodeScienceRunStarted, decodeScienceRunTerminal, emptyScienceFoldState } from './fold.ts'
 import type {
   ScienceChartVersion,
   ScienceProjection,
   ScienceProjectionMetrics,
+  ScienceProjectionState,
+  ScienceProjectionWitnessEvent,
   ScienceRun,
   ScienceRunIdentity,
 } from './types.ts'
@@ -41,6 +45,127 @@ function replace(
     metrics: metrics(runs, charts, outcome?.revision ?? 0),
     lastScienceEventSeq: eventSeq,
   }
+}
+
+/** Build one JSON-safe canonical witness event. */
+function projectionWitnessEvent(
+  event: Pick<SessionEvent, 'seq' | 'time' | 'type'>,
+  data: unknown,
+): ScienceProjectionWitnessEvent {
+  if (!Number.isSafeInteger(event.seq) || event.seq < 0
+    || !Number.isSafeInteger(event.time) || event.time < 0
+    || !isJsonValue(data)) {
+    throw new Error('invalid projection witness event')
+  }
+  return { seq: event.seq, time: event.time, type: event.type, data: data as JsonValue }
+}
+
+/** Whether one Core turn or step coordinate can occur in a valid Session log. */
+function validExecutionCoordinate(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0
+}
+
+/** Whether one retained Core identity is usable by strict Science replay. */
+function validCoreIdentity(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+/** Redact one Session event to the exact facts consumed by strict replay. */
+function witnessEvent(event: SessionEvent): ScienceProjectionWitnessEvent | undefined {
+  switch (event.type) {
+    case 'science/mode-bound':
+    case 'science/environment-bound':
+    case 'science/run-started':
+    case 'science/run-finished':
+    case 'science/chart-saved':
+    case 'science/outcome-published':
+      if (event.ignorable === true) throw new Error('Science projection witness cannot omit required-event semantics')
+      return projectionWitnessEvent(event, event.data)
+    case 'step/start':
+    case 'request/header':
+    case 'user/message':
+    case 'assistant/message':
+    case 'session/end-seed':
+      return projectionWitnessEvent(event, {})
+    case 'step/end':
+      if (!validExecutionCoordinate(event.data.turn)
+        || !validExecutionCoordinate(event.data.step)) {
+        throw new Error('invalid step/end projection witness')
+      }
+      return projectionWitnessEvent(event, { turn: event.data.turn, step: event.data.step })
+    case 'tool/call': {
+      if (!validExecutionCoordinate(event.data.turn)
+        || !validExecutionCoordinate(event.data.step)
+        || !validCoreIdentity(event.data.callId)
+        || !validCoreIdentity(event.data.name)) {
+        throw new Error('invalid tool/call projection witness')
+      }
+      return projectionWitnessEvent(event, {
+        turn: event.data.turn,
+        step: event.data.step,
+        callId: event.data.callId,
+        name: event.data.name,
+      })
+    }
+    case 'tool/result': {
+      if (!validCoreIdentity(event.data.message.source.callId)) {
+        throw new Error('invalid tool/result projection witness')
+      }
+      return projectionWitnessEvent(event, {
+        message: { source: { callId: event.data.message.source.callId } },
+      })
+    }
+    default:
+      return undefined
+  }
+}
+
+/** Whether one pre-mode event permanently makes a later mode binding illegal. */
+function preventsModeBinding(event: Pick<ScienceProjectionWitnessEvent, 'type'>): boolean {
+  return event.type === 'step/start'
+    || event.type === 'request/header'
+    || event.type === 'tool/call'
+}
+
+/** Whether strict replay can need this event if mode has not yet been bound. */
+function relevantBeforeMode(event: SessionEvent): boolean {
+  return event.type.startsWith('science/')
+    || preventsModeBinding(event)
+    || event.type === 'user/message'
+    || event.type === 'assistant/message'
+    || event.type === 'tool/result'
+}
+
+/** Derive the public value from one accepted strict fold accumulator. */
+function projectionFromFold(state: ReturnType<typeof emptyScienceFoldState>): ScienceProjection | null {
+  if (state.mode === undefined || state.lastScienceEventSeq === undefined) return null
+  const outcome = state.outcomes.at(-1) ?? null
+  return {
+    mode: state.mode,
+    environment: state.environments.at(-1) ?? null,
+    runs: state.runs,
+    charts: state.charts,
+    outcome,
+    metrics: metrics(state.runs, state.charts, outcome?.revision ?? 0),
+    lastScienceEventSeq: state.lastScienceEventSeq,
+  }
+}
+
+/** Strictly replay a sparse witness; omitted seqs stand for irrelevant events. */
+function replayWitness(witness: readonly ScienceProjectionWitnessEvent[]): ScienceProjection | null {
+  const state = emptyScienceFoldState()
+  let previousSeq = -1
+  for (const candidate of witness) {
+    if (candidate.seq <= previousSeq) throw new Error('projection witness seq must strictly increase')
+    if (candidate.type === 'session/end-seed'
+      && !state.runs.some(run => run.status === 'running')) {
+      throw new Error('projection witness retains an irrelevant seed boundary')
+    }
+    previousSeq = candidate.seq
+    state.nextSeq = candidate.seq
+    applyScienceEvent(state, candidate as SessionEvent)
+  }
+  return projectionFromFold(state)
 }
 
 /** Compare start-owned fields repeated in a run terminal value. */
@@ -231,6 +356,41 @@ export function applyScienceProjection(
   }
 }
 
+/**
+ * Fold one event into the persisted Science projection cache state.
+ * The private redacted witness keeps checkpoint provenance verifiable while
+ * the public value remains metadata-only and client-safe.
+ * @param state - internal projection cache after all prior events.
+ * @param event - next committed Session event.
+ * @returns updated cache state or the same reference when Science is unchanged.
+ */
+export function applyScienceProjectionState(
+  state: ScienceProjectionState,
+  event: SessionEvent,
+): ScienceProjectionState {
+  try {
+    if (state.value === null) {
+      if (state.witness.some(preventsModeBinding) || !relevantBeforeMode(event)) return state
+    }
+    const hadRunningRun = state.value?.runs.some(run => run.status === 'running') === true
+    if (event.type === 'session/end-seed' && !hadRunningRun) return state
+    const redacted = witnessEvent(event)
+    if (redacted === undefined) return state
+    const witness = [...state.witness, redacted]
+    return { value: replayWitness(witness), witness }
+  } catch {
+    return state
+  }
+}
+
+/**
+ * Build the empty internal Science projection cache state.
+ * @returns a cache state before any Session event has been observed.
+ */
+export function emptyScienceProjectionState(): ScienceProjectionState {
+  return { value: null, witness: [] }
+}
+
 /** Whether a candidate is a plain JSON record. */
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -380,6 +540,7 @@ function validToolCallOwnership(
 /** Validate the complete projection value, including its derived counters. */
 function validProjection(value: unknown): value is ScienceProjection | null {
   if (value === null) return true
+  if (!isJsonValue(value)) return false
   const candidate = record(value)
   if (candidate === undefined || !exactKeys(candidate, [
     'mode',
@@ -440,4 +601,34 @@ function validProjection(value: unknown): value is ScienceProjection | null {
 export const scienceProjectionSchema: ZodType<ScienceProjection | null> = z.custom<ScienceProjection | null>(
   validProjection,
   { message: 'invalid Science projection value' },
+)
+
+/** Validate internal checkpoint state before its public value is served. */
+function validProjectionState(value: unknown): value is ScienceProjectionState {
+  try {
+    if (!isJsonValue(value)) return false
+    const candidate = record(value)
+    if (candidate === undefined || !exactKeys(candidate, ['value', 'witness'])) return false
+    if (!validProjection(candidate['value'])) return false
+    if (!Array.isArray(candidate['witness'])) return false
+    const witness = candidate['witness'].map((raw): ScienceProjectionWitnessEvent => {
+      const event = record(raw)
+      if (event === undefined || !exactKeys(event, ['seq', 'time', 'type', 'data'])
+        || typeof event['type'] !== 'string') throw new Error('malformed projection witness event')
+      const normalized = witnessEvent(event as unknown as SessionEvent)
+      if (normalized === undefined || !isDeepStrictEqual(normalized, event)) {
+        throw new Error('non-canonical projection witness event')
+      }
+      return normalized
+    })
+    return isDeepStrictEqual(replayWitness(witness), candidate['value'])
+  } catch {
+    return false
+  }
+}
+
+/** Wire validator for persisted internal Science projection checkpoints. */
+export const scienceProjectionStateSchema: ZodType<ScienceProjectionState> = z.custom<ScienceProjectionState>(
+  validProjectionState,
+  { message: 'invalid Science projection checkpoint state' },
 )
