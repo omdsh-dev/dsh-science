@@ -33,7 +33,7 @@ flowchart LR
   Projection --> UI["Science Details view"]
 ```
 
-开发一次只推进一个阶段。每个阶段都有独立本地提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切的 2026-08-13 DSH 快照 `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` 播种到一个未配置 remote 的独立本地仓库。它不修改现有 DSH worktree、不创建公开仓库、不触碰 `dsh-external`，也不上传变更。
+开发一次只推进一个阶段。每个阶段都有独立提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切的 2026-08-13 DSH 快照 `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` 播种，并通过社区仓库 `omdsh-dev/dsh-science` 发布。现有 DSH worktree 与 `dsh-external` 保持独立。
 
 ## 产品决策
 
@@ -45,7 +45,7 @@ flowchart LR
 | Python 与 R | 两种语言可以使用不同 prefix，也可以使用同一个 | 可用性与 drift 分开报告 |
 | 执行 | 每次调用使用一个全新进程 | 变量不持久；跨调用状态由 `state/` 下的显式文件承载 |
 | UI | Outcome、Charts、Environment 与 Conversation 位于现有右侧 Details 栏 | 左侧导航与通用工具详情保留各自 owner |
-| 开发隔离 | 从确切 DSH commit 播种、无 remote 的独立干净本地仓库 | 现有 DSH `ui-journey` 变更与所有 external 仓库保持不动 |
+| 开发来源 | 从确切 DSH commit 播种的社区仓库 | 现有 DSH worktree 与 `dsh-external` 保持独立 |
 
 ## 包所有权
 
@@ -152,7 +152,7 @@ Phase 1 修改 Science domain package，并且只修改安全服务该领域所�
 
 **把 Science truth 存进 tool result 或 UI database。** 拒绝，因为 cold resume 与 fork 会需要第二套 reconciliation protocol，且 UI 可能与权威 Session log 不一致。tool call arguments/result 保留 code 与 output；Science event 保留紧凑 provenance 与 state。
 
-**使用 CSSwitch 或 `dsh-external` 作为 Science implementation owner。** 拒绝，因为这些 repository 不拥有 DSH Outcome、chart-version、environment、conversation 或 Session projection semantics。此变更保持在 DSH source line 的本地仓库中，不创建 external mirror。
+**使用 CSSwitch 或 `dsh-external` 作为 Science implementation owner。** 拒绝，因为这些 repository 不拥有 DSH Outcome、chart-version、environment、conversation 或 Session projection semantics。Science source line 由 `omdsh-dev/dsh-science` 维护。
 
 **从 persistent Python/R kernel 开始。** 拒绝，因为 kernel ownership、crash recovery、隐藏 mutable variable、package drift 与 process dispose 会在 durable product loop 尚未验证前主导 MVP。fresh process 加显式 `state/` 让 cross-call state 可见。
 

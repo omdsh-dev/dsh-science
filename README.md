@@ -1,72 +1,78 @@
-# DeepSeek Harness
+# DSH Science
 
 English | [中文](README.zh.md)
 
-DeepSeek Harness (`dsh`) is an open-source coding agent and plugin-based agent harness.
+DSH Science is a community branch of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) for reproducible Python and R work in durable agent sessions.
 
-It uses an architecture where **everything is a plugin**.
-
-## Internal testing notice
-
-DeepSeek Harness is under internal testing. Features and interfaces may change.
-
-Session Logs stay local by default. Set `DSH_TELEMETRY_MODE=FEEDBACK_ONLY` to share a Session Log only when submitting feedback, or `DSH_TELEMETRY_MODE=FULL` to upload continuously; `FULL` also enables dsh-sdk command telemetry reporting an anonymous ID, the command result, and redacted project configuration. Send feedback through the internal WeChat group.
+It follows the **everything is a plugin** architecture and adds a Science Session domain, a host-local runtime, and a staged path to a complete Science workspace.
 
 ## Run
 
-Install Node.js ^22.19 or >= 24 and pnpm 11, then run the published package:
-
-```sh
-npx @deepseek-ai/dsh web
-```
-
-The command initializes the Web profile and prints the Web UI URL, which is `http://127.0.0.1:3080` by default. Open it, add a DeepSeek API key under **Settings → Models**, then start a session. The invoking directory is the default workspace; try `Summarize this repository and identify its main packages.`
-
-Continue with the [Web UI guide](docs/user/guide/index.md).
-
 ### Run from source
 
-To run a repository checkout instead:
+Install Node.js ^22.19 or >= 24 and pnpm 11, then run the repository from source:
 
 ```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
+git clone https://github.com/omdsh-dev/dsh-science.git
+cd dsh-science
 pnpm install
 pnpm run build
 pnpm dsh web
 ```
 
-`pnpm run build` prepares the repository artifacts. `pnpm dsh web` starts the Web UI without rebuilding and opens the same path.
+The command starts the Web profile and prints its local URL. Add a DeepSeek API key under **Settings → Models**, then start a session in the workspace from which you launched DSH.
+
+## Science foundation
+
+Phase 2 is complete and provides the runtime foundation for Science Mode:
+
+- Durable Science Session events, strict replay, invariants, and a client-safe projection.
+- Observation of configured existing Conda prefixes for Python and R.
+- Fresh-process execution with direct argv, an explicit clean environment, private per-session scratch, and full file-write confinement.
+- Cancellation, timeout, process-tree quiescence, environment drift detection, and bounded output collection.
+
+The [Science Mode execution chain](docs/science-mode.md), [Science subsystem reference](docs/subsystems/science.md), and [Science Runtime package](packages/science/science-runtime/README.md) describe the implemented interfaces and ownership.
+
+## Roadmap
+
+| Phase | Plan |
+| --- | --- |
+| 3 | Ship the Science preset, reconstructable environment context, state queries, and Python/R tools. |
+| 4 | Add immutable PNG chart versions and evidence-linked Outcome publication. |
+| 5 | Add the Science view to the existing Details column. |
+| 6 | Complete product composition, built-package checks, GUI replay, and source closure. |
+
+The [Science MVP Decision Record](.agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md) owns the complete staged design.
 
 ## Profiles and plugins
 
-A profile is an ordered list of plugin bundles. The shipped `web` profile powers `dsh web`. Manage a profile with `dsh plugin --profile <name> <pnpm args>`, which forwards the remaining arguments to pnpm in that profile's directory:
+A profile is an ordered list of plugin bundles. From a source checkout, manage the Web profile with the same pnpm-backed plugin command used across DSH:
 
 ```sh
-npx -p @deepseek-ai/dsh dsh plugin --profile web add <package>
-npx -p @deepseek-ai/dsh dsh plugin --profile web remove <package>
+pnpm dsh plugin --profile web add <package>
+pnpm dsh plugin --profile web remove <package>
 ```
 
-`add`, `remove`, `update`, `why`, and other pnpm commands work unchanged. The command initializes a missing profile before changing its packages and updates its bundle list from installed packages that declare `dsh.bundle`. See the [CLI reference](apps/cli/reference/README.md#plugin-management) for the exact behavior.
+Use the [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic when publishing a DSH plugin so it appears in the shared ecosystem.
 
-The [CLI reference](apps/cli/README.md) covers headless execution and custom profiles. The [Python SDK](python/README.md) and [examples](examples/README.md) cover programmatic and custom compositions.
+## Documentation
+
+The [Web UI guide](docs/user/guide/index.md), [CLI reference](apps/cli/README.md), [Python SDK](python/README.md), and [examples](examples/README.md) cover the main ways to use and extend DSH.
+
+Start development with the [development guide](docs/development.md) and [architecture documentation](docs/architecture.md). Agents follow [AGENTS.md](AGENTS.md).
 
 ## Community
 
-Follow <a href="https://x.com/Deepseekharness">DeepSeek Harness on Twitter</a> for project updates.
+DSH Science is maintained in the [omdsh-dev](https://github.com/omdsh-dev) community and builds on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-## Development
-
-Start with the [development guide](docs/development.md) and read the [architecture](docs/architecture.md) before changing packages.
-
-For agents, follow [AGENTS.md](AGENTS.md).
-
-## License
-
-BSD 3-Clause
-
-Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Open an [issue](https://github.com/omdsh-dev/dsh-science/issues) for bugs, proposals, and implementation discussions.
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing to this repository.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing.
+
+## License
+
+[BSD 3-Clause](LICENSE)
+
+Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

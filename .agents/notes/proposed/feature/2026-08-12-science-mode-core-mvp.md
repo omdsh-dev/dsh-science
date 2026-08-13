@@ -33,7 +33,7 @@ flowchart LR
   Projection --> UI["Science Details view"]
 ```
 
-Development advances one phase at a time. Every phase receives a separate local commit, focused verification, fresh independent review, and a stop before the next phase. The Science work is seeded from the exact 2026-08-13 DSH snapshot `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` in a standalone local repository with no configured remote. It does not modify the existing DSH working tree, create a public repository, touch `dsh-external`, or upload changes.
+Development advances one phase at a time. Every phase receives a separate commit, focused verification, fresh independent review, and a stop before the next phase. The Science work is seeded from the exact 2026-08-13 DSH snapshot `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` and published through the community repository `omdsh-dev/dsh-science`. Existing DSH working trees and `dsh-external` remain separate.
 
 ## Product decisions
 
@@ -45,7 +45,7 @@ Development advances one phase at a time. Every phase receives a separate local 
 | Python and R | Each language may use a different prefix or the same prefix | Availability and drift are reported independently |
 | Execution | One fresh process per call | Variables do not persist; explicit files under `state/` carry cross-call state |
 | UI | Outcome, Charts, Environment, and Conversation appear in the existing right Details column | The left navigation and generic tool details retain their owners |
-| Development isolation | Standalone clean local repository, seeded from the exact DSH commit, with no remote | Existing DSH `ui-journey` changes and all external repositories remain untouched |
+| Development source | Community repository seeded from the exact DSH commit | Existing DSH working trees and `dsh-external` remain separate |
 
 ## Package ownership
 
@@ -152,7 +152,7 @@ Phase 1 changes the Science domain package and only the generic projection/persi
 
 **Store Science truth in tool results or a UI database.** Rejected because cold resume and fork would need a second reconciliation protocol, and the UI could disagree with the authoritative Session log. Tool call arguments and results retain code and output; Science events retain compact provenance and state.
 
-**Use CSSwitch or `dsh-external` as the Science implementation owner.** Rejected because those repositories do not own DSH Outcome, chart-version, environment, conversation, or Session projection semantics. This change remains local to the DSH source line and creates no external mirror.
+**Use CSSwitch or `dsh-external` as the Science implementation owner.** Rejected because those repositories do not own DSH Outcome, chart-version, environment, conversation, or Session projection semantics. The Science source line is maintained in `omdsh-dev/dsh-science`.
 
 **Start with persistent Python and R kernels.** Rejected because kernel ownership, crash recovery, hidden mutable variables, package drift, and process disposal would dominate the MVP before the durable product loop is tested. Fresh processes plus explicit `state/` make cross-call state visible.
 
