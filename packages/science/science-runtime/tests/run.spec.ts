@@ -185,6 +185,50 @@ describe('ScienceRuntime.startRun', () => {
     }
   })
 
+  it('contains a synchronous provider termination failure raised by cancellation', async () => {
+    const root = mkdtempSync(join(process.cwd(), '.science-runtime-abort-termination-'))
+    roots.push(root)
+    const prefix = createFakePythonPrefix(root)
+    const harness = await createControlledRuntimeHarness(root, { fake: { pythonPrefix: prefix } })
+    contexts.push(harness.ctx)
+    const session = createScienceSession(harness.ctx, 'science-abort-termination')
+    await bindFakePython(harness.runtime, session)
+    const environment = replayScience(session.events)?.environment
+    if (environment === null || environment === undefined) throw new Error('missing applied environment')
+    const scratch = await ensureSessionScratch(join(root, 'dsh-home'), session)
+    const plan = planRun(environment, 'python', 'print(1)')
+    const runScratch = await createRunScratch(scratch, plan.runId, 'python', plan.sourceBytes)
+    const authorization = authorizePythonRun(session, 'science-abort-termination')
+    const started = startCandidate(plan, runScratch, 'python', environment, authorization.toolCallId, authorization.requestHeaderSeq)
+    const run = harness.subprocess.queueRun('immediate')
+    let terminationAttempts = 0
+    ;(run.handle as { terminate(): void }).terminate = () => {
+      terminationAttempts += 1
+      throw new Error('provider terminate failed')
+    }
+    const cancellation = new AbortController()
+    const control = new OperationControl(cancellation.signal, 1_000)
+    try {
+      const settled = settleRun({
+        subprocess: harness.subprocess,
+        sandbox: harness.sandbox,
+        session,
+        sessionScratch: scratch,
+        control,
+      }, started, plan, runScratch, {
+        argv: [plan.binding.executable], denialSignatures: [], runnerFailureRules: [],
+      })
+      cancellation.abort()
+      run.complete({ exitCode: 0, signal: null })
+      await expect(settled).resolves.toMatchObject({
+        result: { terminal: { status: 'cancelled', failureCode: 'CANCELLED' } },
+      })
+      expect(terminationAttempts).toBe(1)
+    } finally {
+      control.dispose()
+    }
+  })
+
 
   it('constructs the Windows PATH through the direct execution seam without treating a Darwin binding as a Windows observation', async () => {
     const root = mkdtempSync(join(process.cwd(), '.science-runtime-windows-execution-'))

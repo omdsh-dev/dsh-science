@@ -354,7 +354,11 @@ export async function settleRun(
   let outcome: { readonly exitCode: number | null; readonly signal: string | null } | undefined
   let spawnError: unknown
   const stop = (): void => {
-    handle?.terminate()
+    try {
+      handle?.terminate()
+    } catch {
+      // Settlement owns provider termination failures and still proves whole-tree exit before publishing.
+    }
   }
   services.control.signal.addEventListener('abort', stop, { once: true })
   try {
