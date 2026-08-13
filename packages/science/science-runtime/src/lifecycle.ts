@@ -121,7 +121,7 @@ export class LeaseRegistry {
     if (lease.released) return
     lease.released = true
     this.exact.delete(lease.session)
-    if (this.byId.get(String(lease.session.id)) === lease) this.byId.delete(String(lease.session.id))
+    this.byId.delete(String(lease.session.id))
     this.active.delete(lease)
     lease.control.dispose()
     lease.finishSettlement()

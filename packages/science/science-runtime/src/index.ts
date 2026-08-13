@@ -5,7 +5,6 @@
  * @module @deepseek-ai/dsh-science-runtime
  */
 
-import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { ScienceEnvironmentProfileId, replayScience } from '@deepseek-ai/dsh-science-session'
@@ -25,9 +24,11 @@ import { confineRun, planRun, settleRun, startCandidate } from './execution.ts'
 import { LeaseRegistry, OperationControl } from './lifecycle.ts'
 import {
   createRunScratch,
-  ensureSessionScratch,
+  materializeSessionScratch,
+  planRunScratch,
+  planSessionScratch,
   removeUnpublishedRunScratch,
-  scienceSessionScratchRoot,
+  rollbackSessionScratch,
 } from './scratch.ts'
 import { ScienceRuntimeError } from './types.ts'
 import type {
@@ -110,12 +111,11 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
       throw new ScienceRuntimeError('ENVIRONMENT_NOT_READY', 'Science environment cannot be rebound after the first run')
     }
     const lease = this.reserve(request.session, request.signal)
+    let scratchPreparation: Awaited<ReturnType<typeof materializeSessionScratch>> | undefined
     try {
       this.assertPrepublication(request.session, lease.control)
-      const scratchRoot = await scienceSessionScratchRoot(this.dshHome, request.session)
-      await assertProfileRunConfinement(profile, request.session, scratchRoot)
-      this.assertPrepublication(request.session, lease.control)
-      const sessionScratch = await ensureSessionScratch(this.dshHome, request.session)
+      const sessionScratch = await planSessionScratch(this.dshHome, request.session)
+      await assertProfileRunConfinement(profile, request.session, sessionScratch.root)
       this.assertPrepublication(request.session, lease.control)
       const observed = await observeProfile({
         subprocess: this.ctx.subprocess,
@@ -123,12 +123,13 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
         sessionScratch,
         sessionId: request.session.id,
         signal: lease.control.signal,
+        prepareSessionScratch: async () => {
+          scratchPreparation = await materializeSessionScratch(this.dshHome, request.session)
+          this.assertPrepublication(request.session, lease.control)
+        },
       }, profile)
       this.assertPrepublication(request.session, lease.control)
       const current = this.assertSession(request.session)
-      if (current.runs.length !== 0) {
-        throw new ScienceRuntimeError('ENVIRONMENT_NOT_READY', 'Science environment cannot be rebound after the first run')
-      }
       const bindings = [observed.python?.binding, observed.r?.binding].filter(binding => binding !== undefined)
       const failures = bindings.filter(binding => binding.capability !== 'available')
       const now = Date.now()
@@ -146,6 +147,14 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
       request.session.append('science/environment-bound', { version: 1, environment })
       return environment
     } catch (error) {
+      try {
+        if (scratchPreparation !== undefined) await rollbackSessionScratch(scratchPreparation)
+      } catch (rollbackError) {
+        throw this.prepublicationError(lease.control, new AggregateError(
+          [error, rollbackError],
+          'science-runtime: pre-publication Session scratch rollback failed',
+        ))
+      }
       throw this.prepublicationError(lease.control, error)
     } finally {
       this.leases.release(lease)
@@ -170,31 +179,16 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
     }
     const profile = this.profile(String(environment.profileId))
     const lease = this.reserve(request.session, request.signal)
-    let sessionScratch: Awaited<ReturnType<typeof ensureSessionScratch>> | undefined
+    let sessionScratch: Awaited<ReturnType<typeof planSessionScratch>> | undefined
+    let scratchPreparation: Awaited<ReturnType<typeof materializeSessionScratch>> | undefined
     let runScratch: Awaited<ReturnType<typeof createRunScratch>> | undefined
-    let published = false
     try {
       this.assertPrepublication(request.session, lease.control)
       const plan = planRun(environment, request.language, request.code)
-      const scratchRoot = await scienceSessionScratchRoot(this.dshHome, request.session)
-      await assertProfileRunConfinement(profile, request.session, scratchRoot)
-      sessionScratch = await ensureSessionScratch(this.dshHome, request.session)
-      this.assertPrepublication(request.session, lease.control)
-      const observed = await observeProfile({
-        subprocess: this.ctx.subprocess,
-        sandbox: this.ctx.sandbox,
-        sessionScratch,
-        sessionId: request.session.id,
-        signal: lease.control.signal,
-      }, profile)
-      this.assertPrepublication(request.session, lease.control)
-      if (!this.matchesEnvironment(environment, observed.python?.binding, observed.r?.binding)) {
-        const drifted = this.reobservedEnvironment(environment, observed.python?.binding, observed.r?.binding)
-        request.session.append('science/environment-bound', { version: 1, environment: drifted })
-        throw new ScienceRuntimeError('ENVIRONMENT_NOT_READY', 'Science environment changed during run preflight')
-      }
-      const source = join(sessionScratch.runs, String(plan.runId), request.language === 'python' ? 'code.py' : 'code.R')
-      if (request.language === 'r' && join(sessionScratch.runs, String(plan.runId), 'tmp').includes(' ')) {
+      sessionScratch = await planSessionScratch(this.dshHome, request.session)
+      await assertProfileRunConfinement(profile, request.session, sessionScratch.root)
+      const plannedRun = planRunScratch(sessionScratch, plan.runId, request.language)
+      if (request.language === 'r' && plannedRun.tmp.includes(' ')) {
         throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'R run TMPDIR cannot contain an ASCII space')
       }
       const confined = confineRun({
@@ -203,8 +197,24 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
         session: request.session,
         sessionScratch,
         control: lease.control,
-      }, plan, source)
+      }, plan, plannedRun.source)
+      const observed = await observeProfile({
+        subprocess: this.ctx.subprocess,
+        sandbox: this.ctx.sandbox,
+        sessionScratch,
+        sessionId: request.session.id,
+        signal: lease.control.signal,
+        prepareSessionScratch: async () => {
+          scratchPreparation = await materializeSessionScratch(this.dshHome, request.session)
+          this.assertPrepublication(request.session, lease.control)
+        },
+      }, profile)
       this.assertPrepublication(request.session, lease.control)
+      if (!this.matchesEnvironment(environment, observed.python?.binding, observed.r?.binding)) {
+        const drifted = this.reobservedEnvironment(environment, observed.python?.binding, observed.r?.binding)
+        request.session.append('science/environment-bound', { version: 1, environment: drifted })
+        throw new ScienceRuntimeError('ENVIRONMENT_NOT_READY', 'Science environment changed during run preflight')
+      }
       runScratch = await createRunScratch(sessionScratch, plan.runId, request.language, plan.sourceBytes)
       this.assertPrepublication(request.session, lease.control)
       const started = startCandidate(
@@ -216,7 +226,6 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
         request.requestHeaderSeq,
       )
       request.session.append('science/run-started', { version: 1, run: started })
-      published = true
       const done = this.settlePublishedRun(lease, request.session, sessionScratch, plan, runScratch, confined, started)
       return {
         runId: plan.runId,
@@ -224,15 +233,28 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
         cancel: () => { lease.control.cancel() },
       }
     } catch (error) {
-      const cleanup = !published && sessionScratch !== undefined && runScratch !== undefined
-        ? removeUnpublishedRunScratch(sessionScratch, runScratch)
-        : undefined
+      const cleanupFailures: unknown[] = []
       try {
-        await cleanup
+        if (sessionScratch !== undefined && runScratch !== undefined) {
+          await removeUnpublishedRunScratch(sessionScratch, runScratch)
+        }
       } catch (cleanupError) {
-        throw new AggregateError([error, cleanupError], 'science-runtime: unpublished run rollback failed')
+        cleanupFailures.push(cleanupError)
+      }
+      try {
+        if (scratchPreparation !== undefined) await rollbackSessionScratch(scratchPreparation)
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupError)
       } finally {
-        if (!published) this.leases.release(lease)
+        this.leases.release(lease)
+      }
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupFailures],
+          runScratch === undefined
+            ? 'science-runtime: pre-publication Session scratch rollback failed'
+            : 'science-runtime: unpublished run rollback failed',
+        )
       }
       throw this.prepublicationError(lease.control, error)
     }
@@ -336,7 +358,7 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
   private async settlePublishedRun(
     lease: ReturnType<LeaseRegistry['reserve']>,
     session: StartScienceRunRequest['session'],
-    sessionScratch: Awaited<ReturnType<typeof ensureSessionScratch>>,
+    sessionScratch: Awaited<ReturnType<typeof planSessionScratch>>,
     plan: ReturnType<typeof planRun>,
     runScratch: Awaited<ReturnType<typeof createRunScratch>>,
     confined: ReturnType<typeof confineRun>,
@@ -360,21 +382,25 @@ export class ScienceRuntime extends Service implements ScienceRuntimeService {
         throw new ScienceRuntimeError('TERMINAL_COMMIT_FAILED', 'Science terminal value could not be prepared after quiescence', { cause: error })
       }
       if (!settled.quiescent) {
-        const eventual = settled.eventualQuiescence
-        if (eventual === undefined) {
-          throw new ScienceRuntimeError('QUIESCENCE_UNPROVEN', 'Science subprocess tree did not reach quiescence after termination')
-        }
         releaseAfterEventualQuiescence = true
-        void eventual.then(
-          (quiescent) => {
-            if (quiescent) this.leases.release(lease)
+        void settled.eventualResult.then(
+          (result) => {
+            if (result === undefined) return
+            if (this.ctx.sessions.get(session.id) !== session) {
+              this.leases.release(lease)
+              return
+            }
+            try {
+              session.append('science/run-finished', { version: 1, run: result.terminal })
+            } catch {
+              // A live Session without its terminal fact remains quarantined.
+              return
+            }
+            this.leases.release(lease)
           },
           () => {},
         )
         throw new ScienceRuntimeError('QUIESCENCE_UNPROVEN', 'Science subprocess tree did not reach quiescence after termination')
-      }
-      if (settled.result === undefined) {
-        throw new ScienceRuntimeError('QUIESCENCE_UNPROVEN', 'Science subprocess tree did not produce a terminal result after quiescence')
       }
       if (this.ctx.sessions.get(session.id) !== session) {
         throw new ScienceRuntimeError('SESSION_NOT_LIVE', 'Science Session detached before terminal publication')

@@ -68,7 +68,7 @@ npx -p @deepseek-ai/dsh dsh plugin --profile web remove <package>
 
 ## 许可证
 
-[BSD 3-Clause](LICENSE)
+BSD 3-Clause
 
 第三方依赖及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

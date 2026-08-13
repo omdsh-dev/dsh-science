@@ -7,6 +7,7 @@ import {
   classifyDenial,
   classifyRunnerFailure,
   isRunnerSpawnFailure,
+  SandboxUnavailableError,
   writableRoots,
 } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxPolicy, SandboxProvider } from '@deepseek-ai/dsh-sandbox'
@@ -32,6 +33,19 @@ export const MAX_SOURCE_BYTES = 262_144
 export const MAX_OUTPUT_BYTES = 64_000
 /** Fixed descendant grace before Runtime asks the subprocess seam to terminate. */
 export const DESCENDANT_GRACE_MS = 3_000
+const POSIX_LOCALE = 'C.UTF-8'
+const CHILD_LOCALES: Record<NodeJS.Platform, string> = {
+  aix: POSIX_LOCALE, android: POSIX_LOCALE, darwin: 'en_US.UTF-8', freebsd: POSIX_LOCALE, haiku: POSIX_LOCALE,
+  linux: POSIX_LOCALE, netbsd: POSIX_LOCALE, openbsd: POSIX_LOCALE, sunos: POSIX_LOCALE, win32: POSIX_LOCALE, cygwin: POSIX_LOCALE,
+}
+const PATH_DIRECTORIES: Record<NodeJS.Platform, string> = {
+  aix: 'bin', android: 'bin', darwin: 'bin', freebsd: 'bin', haiku: 'bin', linux: 'bin',
+  netbsd: 'bin', openbsd: 'bin', sunos: 'bin', win32: 'Scripts', cygwin: 'bin',
+}
+const PATH_SUFFIXES: Record<NodeJS.Platform, string> = {
+  aix: ':/usr/bin:/bin', android: ':/usr/bin:/bin', darwin: ':/usr/bin:/bin', freebsd: ':/usr/bin:/bin', haiku: ':/usr/bin:/bin',
+  linux: ':/usr/bin:/bin', netbsd: ':/usr/bin:/bin', openbsd: ':/usr/bin:/bin', sunos: ':/usr/bin:/bin', win32: '', cygwin: ':/usr/bin:/bin',
+}
 
 /** Complete pre-publication plan with no Host scratch path exposed publicly. */
 export interface RunPlan {
@@ -57,20 +71,28 @@ export interface ExecutionServices {
   readonly control: OperationControl
 }
 
-/** Terminal result plus whether the owner proved complete process-tree quiescence. */
-export interface SettledRun {
-  readonly quiescent: boolean
-  /** Present only after whole-tree quiescence and output collection completed. */
-  readonly result?: ScienceRunResult
-  /** Background whole-tree wait retained when the immediate proof timed out. */
-  readonly eventualQuiescence?: Promise<boolean>
+/** Terminal result after the owner proved complete process-tree quiescence. */
+export interface QuiescentRun {
+  readonly quiescent: true
+  readonly result: ScienceRunResult
 }
+
+/** Retained whole-tree proof when immediate quiescence was not established. */
+export interface NonQuiescentRun {
+  readonly quiescent: false
+  /** Terminal result once the retained tree observation proves quiescence. */
+  readonly eventualResult: Promise<ScienceRunResult | undefined>
+}
+
+/** Terminal result or the retained proof required before releasing its Session lease. */
+export type SettledRun = QuiescentRun | NonQuiescentRun
 
 /** Exact fixed locale values for a supported POSIX child. */
 function localeEnvironment(): Pick<NodeJS.ProcessEnv, 'LANG' | 'LC_ALL' | 'TZ'> {
+  const locale = CHILD_LOCALES[process.platform]
   return {
-    LANG: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
-    LC_ALL: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
+    LANG: locale,
+    LC_ALL: locale,
     TZ: 'UTC',
   }
 }
@@ -153,7 +175,7 @@ function runEnvironment(
   return {
     HOME: scratch.home,
     TMPDIR: run.tmp,
-    PATH: process.platform === 'win32' ? join(binding.canonicalPrefix, 'Scripts') : `${join(binding.canonicalPrefix, 'bin')}:/usr/bin:/bin`,
+    PATH: `${join(binding.canonicalPrefix, PATH_DIRECTORIES[process.platform])}${PATH_SUFFIXES[process.platform]}`,
     SCIENCE_STATE_DIR: scratch.state,
     SCIENCE_ARTIFACT_DIR: run.artifacts,
     ...localeEnvironment(),
@@ -168,18 +190,28 @@ function output(reader: { readFrom(fromByte: number): SubprocessOutputRead } | u
 }
 
 /** Safely format a durable non-success explanation without retaining program output. */
-function failureMessage(code: string): string {
-  switch (code) {
-    case 'SPAWN_FAILED': return 'The configured interpreter could not start.'
-    case 'SANDBOX_RUNNER_FAILED': return 'The confinement runner failed before the interpreter started.'
-    case 'SANDBOX_DENIED': return 'Confinement denied a requested file effect.'
-    case 'DESCENDANT_CLEANUP_REQUIRED': return 'A descendant required managed-tree cleanup.'
-    case 'PROCESS_SIGNALLED': return 'The interpreter exited from a signal.'
-    case 'PROCESS_EXIT_NONZERO': return 'The interpreter exited with a nonzero status.'
-    case 'TIMEOUT': return 'The Science Runtime operation timed out.'
-    case 'CANCELLED': return 'The Science Runtime operation was cancelled.'
-    default: return 'The Science Runtime operation failed.'
-  }
+type RuntimeFailureCode =
+  | 'SPAWN_FAILED'
+  | 'SANDBOX_RUNNER_FAILED'
+  | 'SANDBOX_DENIED'
+  | 'DESCENDANT_CLEANUP_REQUIRED'
+  | 'PROCESS_SIGNALLED'
+  | 'PROCESS_EXIT_NONZERO'
+  | 'TIMEOUT'
+  | 'CANCELLED'
+
+/** Safe durable explanation for a Runtime-owned failure classification. */
+function failureMessage(code: RuntimeFailureCode): string {
+  return {
+    SPAWN_FAILED: 'The configured interpreter could not start.',
+    SANDBOX_RUNNER_FAILED: 'The confinement runner failed before the interpreter started.',
+    SANDBOX_DENIED: 'Confinement denied a requested file effect.',
+    DESCENDANT_CLEANUP_REQUIRED: 'A descendant required managed-tree cleanup.',
+    PROCESS_SIGNALLED: 'The interpreter exited from a signal.',
+    PROCESS_EXIT_NONZERO: 'The interpreter exited with a nonzero status.',
+    TIMEOUT: 'The Science Runtime operation timed out.',
+    CANCELLED: 'The Science Runtime operation was cancelled.',
+  }[code]
 }
 
 /** Build a terminal value from durable start fields and operational outcome facts. */
@@ -188,7 +220,7 @@ function terminal(
   stdout: ScienceRunOutput,
   stderr: ScienceRunOutput,
   status: ScienceRunTerminal['status'],
-  failureCode: string | undefined,
+  failureCode: RuntimeFailureCode | undefined,
   outcome?: { readonly exitCode: number | null; readonly signal: string | null },
 ): ScienceRunTerminal {
   return {
@@ -211,11 +243,11 @@ function awaitEventualQuiescence(handle: SubprocessHandle): Promise<boolean> {
 }
 
 /** Wait briefly for a post-parent descendant tree, then use the one subprocess termination verb. */
-async function quiesce(handle: SubprocessHandle): Promise<{
-  readonly quiescent: boolean
-  readonly forced: boolean
-  readonly eventualQuiescence?: Promise<boolean>
-}> {
+type Quiescence =
+  | { readonly quiescent: true; readonly forced: boolean }
+  | { readonly quiescent: false; readonly forced: true; readonly eventualQuiescence: Promise<boolean> }
+
+async function quiesce(handle: SubprocessHandle): Promise<Quiescence> {
   try {
     const grace = AbortSignal.timeout(DESCENDANT_GRACE_MS)
     if (await handle.waitForExit(grace)) return { quiescent: true, forced: false }
@@ -283,7 +315,15 @@ export function confineRun(
 ): ConfinedExecution {
   const policy = runPolicy(services.session, services.sessionScratch)
   assertPrefixReadOnly(plan.binding.canonicalPrefix, policy)
-  const confined = services.sandbox.confine(runArgv(plan.binding.language, plan.binding.executable, source), policy)
+  let confined: ReturnType<SandboxProvider['confine']>
+  try {
+    confined = services.sandbox.confine(runArgv(plan.binding.language, plan.binding.executable, source), policy)
+  } catch (error) {
+    if (error instanceof SandboxUnavailableError) {
+      throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science requires an available full sandbox', { cause: error })
+    }
+    throw error
+  }
   if (confined.enforcement !== 'full') {
     throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science requires full sandbox enforcement')
   }
@@ -342,61 +382,63 @@ export async function settleRun(
         spawnError = error
       }
     }
-    const quiescence = handle === undefined ? { quiescent: true, forced: false } : await quiesce(handle)
+    const resultAfterQuiescence = (forced: boolean): ScienceRunResult => {
+      const stdout = handle === undefined ? { text: '', bytes: 0, truncated: false } : output(handle.collected.stdout)
+      const stderr = handle === undefined ? { text: '', bytes: 0, truncated: false } : output(handle.collected.stderr)
+      let status: ScienceRunTerminal['status'] = 'success'
+      let failureCode: RuntimeFailureCode | undefined
+      switch (services.control.cause) {
+        case 'timeout':
+          status = 'timed-out'
+          failureCode = 'TIMEOUT'
+          break
+        case 'cancelled':
+        case 'service-disposed':
+        case 'session-detached':
+          status = 'cancelled'
+          failureCode = 'CANCELLED'
+          break
+        default:
+          if (spawnError !== undefined) {
+            status = 'failed'
+            failureCode = isRunnerSpawnFailure(spawnError, confined.argv[0], run.directory)
+              ? 'SANDBOX_RUNNER_FAILED'
+              : 'SPAWN_FAILED'
+          } else if (outcome === undefined) {
+            status = 'failed'
+            failureCode = 'SPAWN_FAILED'
+          } else {
+            const runnerFailure = classifyRunnerFailure(outcome.exitCode, stderr.text, confined.runnerFailureRules)
+            if (runnerFailure !== undefined) {
+              status = 'failed'
+              failureCode = 'SANDBOX_RUNNER_FAILED'
+            } else if (classifyDenial(outcome.exitCode, stderr.text, confined.denialSignatures)) {
+              status = 'failed'
+              failureCode = 'SANDBOX_DENIED'
+            } else if (forced) {
+              status = 'failed'
+              failureCode = 'DESCENDANT_CLEANUP_REQUIRED'
+            } else if (outcome.signal !== null) {
+              status = 'failed'
+              failureCode = 'PROCESS_SIGNALLED'
+            } else if (outcome.exitCode !== 0) {
+              status = 'failed'
+              failureCode = 'PROCESS_EXIT_NONZERO'
+            }
+          }
+          break
+      }
+      const value = terminal(started, stdout, stderr, status, failureCode, outcome)
+      return { terminal: value, stdout, stderr }
+    }
+    const quiescence: Quiescence = handle === undefined ? { quiescent: true, forced: false } : await quiesce(handle)
     if (!quiescence.quiescent) {
-      if (handle === undefined) throw new Error('science-runtime: missing handle cannot have unproven quiescence')
       return {
         quiescent: false,
-        eventualQuiescence: quiescence.eventualQuiescence ?? awaitEventualQuiescence(handle),
+        eventualResult: quiescence.eventualQuiescence.then(quiescent => quiescent ? resultAfterQuiescence(true) : undefined),
       }
     }
-    const stdout = handle === undefined ? { text: '', bytes: 0, truncated: false } : output(handle.collected.stdout)
-    const stderr = handle === undefined ? { text: '', bytes: 0, truncated: false } : output(handle.collected.stderr)
-    let status: ScienceRunTerminal['status'] = 'success'
-    let failureCode: string | undefined
-    switch (services.control.cause) {
-      case 'timeout':
-        status = 'timed-out'
-        failureCode = 'TIMEOUT'
-        break
-      case 'cancelled':
-      case 'service-disposed':
-      case 'session-detached':
-        status = 'cancelled'
-        failureCode = 'CANCELLED'
-        break
-      default:
-        if (spawnError !== undefined) {
-          status = 'failed'
-          failureCode = isRunnerSpawnFailure(spawnError, confined.argv[0], run.directory)
-            ? 'SANDBOX_RUNNER_FAILED'
-            : 'SPAWN_FAILED'
-        } else if (outcome === undefined) {
-          status = 'failed'
-          failureCode = 'SPAWN_FAILED'
-        } else {
-          const runnerFailure = classifyRunnerFailure(outcome.exitCode, stderr.text, confined.runnerFailureRules)
-          if (runnerFailure !== undefined) {
-            status = 'failed'
-            failureCode = 'SANDBOX_RUNNER_FAILED'
-          } else if (classifyDenial(outcome.exitCode, stderr.text, confined.denialSignatures)) {
-            status = 'failed'
-            failureCode = 'SANDBOX_DENIED'
-          } else if (quiescence.forced) {
-            status = 'failed'
-            failureCode = 'DESCENDANT_CLEANUP_REQUIRED'
-          } else if (outcome.signal !== null) {
-            status = 'failed'
-            failureCode = 'PROCESS_SIGNALLED'
-          } else if (outcome.exitCode !== 0) {
-            status = 'failed'
-            failureCode = 'PROCESS_EXIT_NONZERO'
-          }
-        }
-        break
-    }
-    const value = terminal(started, stdout, stderr, status, failureCode, outcome)
-    return { result: { terminal: value, stdout, stderr }, quiescent: true }
+    return { result: resultAfterQuiescence(quiescence.forced), quiescent: true }
   } finally {
     services.control.signal.removeEventListener('abort', stop)
   }

@@ -55,7 +55,7 @@ Science 提供方只消费公开的 `SubprocessHandle` 操作。它不安装第�
 
 `bindEnvironment` 和 `startRun` 发布前的失败会以 `ScienceRuntimeError` 拒绝。误用与能力错误码为 `SESSION_NOT_LIVE`、`SERVICE_DISPOSING`、`RUNTIME_BUSY`、`ENVIRONMENT_NOT_READY`、`CONFINEMENT_UNAVAILABLE` 和 `INVALID_REQUEST`；调用方中止、发布前超过截止时间和提供方失败分别使用 `OPERATION_CANCELLED`、`OPERATION_TIMED_OUT` 和 `INFRASTRUCTURE_FAILURE`。这些失败不追加运行事件。`science/run-started` 提交后，spawn、runner、进程、超时和调用方取消等结果会把 `done` 结算为终态值，并追加 `science/run-finished`。持久的非成功错误码为 `SPAWN_FAILED`、`SANDBOX_RUNNER_FAILED`、`SANDBOX_DENIED`、`DESCENDANT_CLEANUP_REQUIRED`、`PROCESS_SIGNALLED`、`PROCESS_EXIT_NONZERO`、`TIMEOUT` 和 `CANCELLED`。如果无法证明整棵进程树完全停稳，`done` 会以 `QUIESCENCE_UNPROVEN` 拒绝。如果精确会话仍然存活，但无法追加终态事实，则拒绝为 `TERMINAL_COMMIT_FAILED`。如果精确会话已经脱离或被替换，则在完全停稳后以 `SESSION_NOT_LIVE` 拒绝；这是发布后唯一使用 `SESSION_NOT_LIVE` 的情况，且不是 `TERMINAL_COMMIT_FAILED`。运行时绝不向已脱离的对象或同 ID 后继会话追加事件，也不得返回看似已经持久提交的值。
 
-`startRun` 在发布前分配延后生效的 `ScienceRunHandle`，但直到 `science/run-started` 提交后才对外暴露。随后，运行时启动由其负责的结算任务，并以同一句柄完成该操作。同步 spawn 抛错或已经拒绝的进程 promise 可能在调用方看到句柄前就结算 `done`，但由于持久的开始事实已经存在，`startRun` 仍须返回该句柄。结算任务会一直持有精确会话预约，直到终态提交完成或显式的基础设施拒绝发生。如果无法证明完全停稳，还要保留会话 ID 隔离，直到后续清理证明进程树已经死亡。本地提供方声明对 `sessions`、`subprocess` 和 `sandbox` 的必需 Cordis 注入，使这些服务在终态结算和提供方资源释放期间始终可用。
+`startRun` 在发布前分配延后生效的 `ScienceRunHandle`，但直到 `science/run-started` 提交后才对外暴露。随后，运行时启动由其负责的结算任务，并以同一句柄完成该操作。同步 spawn 抛错或已经拒绝的进程 promise 可能在调用方看到句柄前就结算 `done`，但由于持久的开始事实已经存在，`startRun` 仍须返回该句柄。结算任务会一直持有精确会话预约，直到终态提交完成或显式的基础设施拒绝发生。如果有界结算无法证明完全停稳，`done` 会拒绝，但会话 ID 隔离会继续保留。后续肯定的静止证明会先构造终态事实并向仍存活的精确会话追加，再释放隔离；已经脱离的生命周期在证明后不追加并释放，而否定或拒绝的证明以及仍存活会话的终态提交失败会继续保留隔离。本地提供方声明对 `sessions`、`subprocess` 和 `sandbox` 的必需 Cordis 注入，使这些服务在终态结算和提供方资源释放期间始终可用。
 
 请求不得选择前缀、可执行文件、运行 ID、目录、环境条目、输出上限、宽限期或超时时间。源码必须是非空、格式正确且不含 U+0000 的 Unicode 字符串；其未经改动的 UTF-8 编码最多为 262,144 字节。提供方不添加 BOM、换行或任何规范化处理。它生成 UUID 形式的 `ScienceRunId`。`codeSha256` 是已刷写到源文件中的精确字节的 SHA-256。`scratchKey` 为 `lowerhex(SHA-256(UTF-8("dsh-science-scratch-v1\0" + language + "\0") || codeBytes))`。
 
@@ -69,7 +69,7 @@ Science 提供方只消费公开的 `SubprocessHandle` 操作。它不安装第�
 
 1. 证明精确会话仍存活、已绑定 Science 且没有运行正在执行；取得预约。
 2. 解析允许列表中的 profile 及其静态路径，但不创建暂存目录。如果规范 Science 会话根目录与通用平台临时根目录相等、包含后者或被后者包含，则拒绝该目录；这既确保专用暂存目录在 Linux mount profile 下保持可见，也防止沙箱的宽泛临时目录授权将其包含在内。派生未来运行策略的规范可写根目录，并拒绝与其中任一根目录重叠的前缀。
-3. 对每个需要版本或 UTF-8 探测的可执行文件，在 Science 会话根目录下规划一个唯一、由提供方负责的观测目录。把该目录作为探测策略的 `workspaceRoot`，策略设为 `workspace-write`；派生该策略的每个规范可写根目录，并拒绝与其中任一根目录相等、包含该根目录或被其包含的规范前缀。只有完成这些检查后，才能创建或校验 owner marker 与会话根目录，创建私有观测目录，包装直接 argv，并在 spawn 前要求 `enforcement === 'full'`。探测使用的 `HOME`、`TMPDIR` 与 cwd 都留在这个沙箱可见的目录中。R 会在解释器启动前选择每会话临时目录，而且要求所选路径不含空格，因此，如果 R 观测使用的规范 `tmp/` 路径包含 ASCII 空格，则在 spawn 前以 `CONFINEMENT_UNAVAILABLE` 拒绝。接受观测前，必须等待整棵探测进程树结算，并删除未发布的观测目录。清理失败记为 `INFRASTRUCTURE_FAILURE`。边界不可用、仅部分实施或与前缀重叠时，以 `CONFINEMENT_UNAVAILABLE` 拒绝，且不追加环境事件；如果解释器在静态检查中缺失或不可用，则无需启动进程，仍可生成如实的 `invalid` 观测。
+3. 对每个需要版本或 UTF-8 探测的可执行文件，在 Science 会话根目录下规划一个唯一、由提供方负责的观测目录。把该目录作为探测策略的 `workspaceRoot`，策略设为 `workspace-write`；派生该策略的每个规范可写根目录，并拒绝与其中任一根目录相等、包含该根目录或被其包含的规范前缀。先用这个最终策略包装两个精确的直接 argv 值并要求 `enforcement === 'full'`；只有成功后，才能创建或校验 owner marker 与会话根目录、创建私有观测目录，并 spawn 已保留的包装后 argv。探测使用的 `HOME`、`TMPDIR` 与 cwd 都留在这个沙箱可见的目录中。R 会在解释器启动前选择每会话临时目录，而且要求所选路径不含空格，因此，如果 R 观测使用的规范 `tmp/` 路径包含 ASCII 空格，则在 spawn 前以 `CONFINEMENT_UNAVAILABLE` 拒绝。接受观测前，必须等待整棵探测进程树结算，并删除未发布的观测目录。如果变化后的静态事实要求重新规划重试，而其精确 argv 无法取得完整限制，失败操作会在所有同级探测清理结算后，仅删除由本操作首次创建的精确 marker 与会话根目录；操作开始前已存在的归属保持不变。清理失败记为 `INFRASTRUCTURE_FAILURE`。边界不可用、仅部分实施或与前缀重叠时，以 `CONFINEMENT_UNAVAILABLE` 拒绝，且不追加环境事件；如果解释器在静态检查中缺失或不可用，则无需启动进程，仍可生成如实的 `invalid` 观测。
 4. 构造一个完整的环境修订。所有已声明解释器均可用时状态为 `applied`；环境观测缺失或不可用时，生成如实的 `invalid` 值，只保留已经取得的事实和有界原因。提供方 I/O、取消、超时或限制失败会直接拒绝，而不会伪造环境事实。
 5. 重新检查精确存活性、调用方取消状态和截止时间，追加 `science/environment-bound`，然后在 `finally` 中释放预约。
 
@@ -108,7 +108,7 @@ Python 版本探测使用 `python -I -B -X utf8 --version`；运行使用 `pytho
 
 ### 暂存目录布局与干净的子进程环境
 
-提供方只通过 `resolveDshHome(config.dshHome)` 解析其根目录。创建任何内容前，如果派生的 Science 根目录与规范的 `/tmp` 或 `os.tmpdir()` 根目录在任一方向上重叠，则拒绝该目录。会话键仍为 `lowerhex(SHA-256(UTF-8("dsh-science-session-v1\0" + exactSessionId)))`。安全标记 `science/v1/owners/<session-key>.json` 精确包含 `{ version: 1, key, sessionId }`，模式为 `0600`；首次创建时使用排他式 `open('wx')`、精确的 UTF-8 JSON、文件同步和父目录同步。`science/v1/sessions/<session-key>/` 及其 `home/`、`state/`、`runs/` 和 `probes/` 目录均使用 `0700` 模式。检查现有标记、目录和源文件时，不跟随非预期符号链接。仅有有效且精确匹配的标记、但尚无会话根目录时，属于可恢复的首次创建残留，只允许该精确会话创建根目录。现有会话根目录旁缺少标记、标记格式错误或不匹配、受管文件并非私有，或路径发生逃逸时，系统均快速失败并保持关闭状态。
+提供方只通过 `resolveDshHome(config.dshHome)` 解析其根目录。创建任何内容前，如果派生的 Science 根目录与规范的 `/tmp` 或 `os.tmpdir()` 根目录在任一方向上重叠，则拒绝该目录。会话键仍为 `lowerhex(SHA-256(UTF-8("dsh-science-session-v1\0" + exactSessionId)))`。安全标记 `science/v1/owners/<session-key>.json` 精确包含 `{ version: 1, key, sessionId }`，模式为 `0600`；首次创建时使用排他式 `open('wx')`、精确的 UTF-8 JSON、文件同步和父目录同步。只有独占标记创建成功的物化操作才取得回滚归属；并发的精确复用者不会取得。`science/v1/sessions/<session-key>/` 及其 `home/`、`state/`、`runs/` 和 `probes/` 目录均使用 `0700` 模式。检查现有标记、目录和源文件时，不跟随非预期符号链接。如果取得归属的物化操作失败，它会校验精确的标记字节，并且只删除本次新建的会话根目录与标记；并发或既有归属绝不会被删除。仅有有效且精确匹配的标记、但尚无会话根目录时，属于可恢复的崩溃残留，只允许该精确会话创建根目录。现有会话根目录旁缺少标记、标记格式错误或不匹配、受管文件并非私有，或路径发生逃逸时，系统均快速失败并保持关闭状态。
 
 每次运行的专用内容包括 `runs/<run-id>/code.py` 或 `code.R`、`tmp/` 和 `artifacts/`。其 cwd 为该运行目录。源文件及其所在的运行目录会在开始事件前完成同步。开始前回滚只能删除新创建且尚未发布的运行目录；清理失败会与发起清理的失败合并报告，不得隐藏。成功、失败、取消、恢复、会话资源释放和服务资源释放后的运行均保留暂存数据。提供方绝不删除或写入已配置的 Conda 前缀。owner marker 是冲突防护标记，不是第二份事件日志或投影数据库。
 

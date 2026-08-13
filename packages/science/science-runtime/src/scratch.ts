@@ -32,6 +32,18 @@ export interface ScienceSessionScratch {
   readonly probes: string
 }
 
+/** Exact ownership created or verified by one pre-publication operation. */
+export interface ScienceSessionScratchPreparation {
+  /** Planned paths that were materialized or already existed. */
+  readonly scratch: ScienceSessionScratch
+  /** Whether this operation created the exact owner marker and Session root. */
+  readonly created: boolean
+  /** Private owner marker that must still match before rollback. */
+  readonly marker: string
+  /** Exact marker bytes written or verified for this Session. */
+  readonly owner: string
+}
+
 /** Private paths prepared for one published run. */
 export interface ScienceRunScratch {
   /** Session-relative durable directory reference. */
@@ -114,7 +126,7 @@ async function createPrivateDirectory(path: string): Promise<void> {
     await mkdir(path, { mode: 0o700 })
     await chmod(path, 0o700)
   } catch (error: unknown) {
-    if (typeof error !== 'object' || error === null || (error as { code?: unknown }).code !== 'EEXIST') throw error
+    if (typeof error !== 'object' || error === null || (error as { readonly code?: unknown }).code !== 'EEXIST') throw error
   }
   await privateDirectory(path)
 }
@@ -192,19 +204,41 @@ export async function scienceSessionScratchRoot(dshHome: string | undefined, ses
   return (await rootForSession(dshHome, session)).root
 }
 
+/** Return every retained path below one already-derived Session root. */
+function sessionScratchPaths(root: string): ScienceSessionScratch {
+  return {
+    root,
+    home: join(root, 'home'),
+    state: join(root, 'state'),
+    runs: join(root, 'runs'),
+    probes: join(root, 'probes'),
+  }
+}
+
+/**
+ * Derive every retained Session path without creating its owner marker or tree.
+ * @param dshHome - Optional explicit Harness home.
+ * @param session - Exact Session that would own the paths.
+ * @returns Future private paths suitable for confinement planning.
+ */
+export async function planSessionScratch(dshHome: string | undefined, session: Session): Promise<ScienceSessionScratch> {
+  const { root } = await rootForSession(dshHome, session)
+  return sessionScratchPaths(root)
+}
+
 /** Test whether one optional managed path exists without treating other errors as absence. */
 async function exists(path: string): Promise<boolean> {
   try {
     await lstat(path)
     return true
   } catch (error: unknown) {
-    if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ENOENT') return false
+    if (typeof error === 'object' && error !== null && (error as { readonly code?: unknown }).code === 'ENOENT') return false
     throw error
   }
 }
 
 /** Create or verify the exclusive owner marker before reusing Session scratch. */
-async function ensureOwner(marker: string, root: string, key: string, session: Session): Promise<void> {
+async function ensureOwner(marker: string, root: string, key: string, session: Session): Promise<boolean> {
   const markerExists = await exists(marker)
   const rootExists = await exists(root)
   if (!markerExists && rootExists) {
@@ -219,10 +253,52 @@ async function ensureOwner(marker: string, root: string, key: string, session: S
     // The marker is persisted before the root exists. A crash in that narrow
     // interval leaves an exact, private owner record with no mutable scratch;
     // resuming only this matching Session can complete its root creation.
-    return
+    return false
   }
   await createPrivateTree(dirname(dirname(dirname(dirname(marker)))), ['science', 'v1', 'owners'])
-  await writePrivateFile(marker, expected)
+  try {
+    await writePrivateFile(marker, expected)
+    return true
+  } catch (error: unknown) {
+    if (typeof error !== 'object' || error === null || (error as { readonly code?: unknown }).code !== 'EEXIST') throw error
+    await privateFile(marker)
+    if (await readFile(marker, 'utf8') !== expected) {
+      throw new Error('science-runtime: concurrently created owner marker does not match the exact Session identity')
+    }
+    return false
+  }
+}
+
+/**
+ * Create or verify retained Session ownership for one pre-publication operation.
+ * @param dshHome - Optional explicit Harness home.
+ * @param session - Exact Session that owns the marker and paths.
+ * @returns Exact ownership facts retained until publication or rollback.
+ */
+export async function materializeSessionScratch(
+  dshHome: string | undefined,
+  session: Session,
+): Promise<ScienceSessionScratchPreparation> {
+  const derived = await rootForSession(dshHome, session)
+  const scratch = sessionScratchPaths(derived.root)
+  const owner = JSON.stringify({ version: OWNER_VERSION, key: derived.key, sessionId: String(session.id) })
+  let created = false
+  try {
+    await mkdir(derived.home, { recursive: true, mode: 0o700 })
+    created = await ensureOwner(derived.marker, derived.root, derived.key, session)
+    await createPrivateTree(derived.home, ['science', 'v1', 'sessions'])
+    await createPrivateDirectory(derived.root)
+    await Promise.all([scratch.home, scratch.state, scratch.runs, scratch.probes].map(createPrivateDirectory))
+    return { scratch, created, marker: derived.marker, owner }
+  } catch (error) {
+    const preparation = { scratch, created, marker: derived.marker, owner }
+    try {
+      await rollbackSessionScratch(preparation)
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], 'science-runtime: incomplete Session scratch rollback failed')
+    }
+    throw error
+  }
 }
 
 /**
@@ -232,31 +308,86 @@ async function ensureOwner(marker: string, root: string, key: string, session: S
  * @returns Host-only private paths; callers never expose them in durable events.
  */
 export async function ensureSessionScratch(dshHome: string | undefined, session: Session): Promise<ScienceSessionScratch> {
-  const derived = await rootForSession(dshHome, session)
-  await mkdir(derived.home, { recursive: true, mode: 0o700 })
-  await ensureOwner(derived.marker, derived.root, derived.key, session)
-  await createPrivateTree(derived.home, ['science', 'v1', 'sessions'])
-  await createPrivateDirectory(derived.root)
-  const home = join(derived.root, 'home')
-  const state = join(derived.root, 'state')
-  const runs = join(derived.root, 'runs')
-  const probes = join(derived.root, 'probes')
-  await Promise.all([home, state, runs, probes].map(createPrivateDirectory))
-  return { root: derived.root, home, state, runs, probes }
+  return (await materializeSessionScratch(dshHome, session)).scratch
+}
+
+/**
+ * Remove only ownership first created by a failed pre-publication operation.
+ * @param preparation - Exact materialization result retained by the operation.
+ */
+export async function rollbackSessionScratch(preparation: ScienceSessionScratchPreparation): Promise<void> {
+  if (!preparation.created) return
+  const markerExists = await exists(preparation.marker)
+  const rootExists = await exists(preparation.scratch.root)
+  if (!markerExists && !rootExists) return
+  if (!markerExists) {
+    throw new Error('science-runtime: owner marker disappeared before Session scratch rollback')
+  }
+  await privateFile(preparation.marker)
+  if (await readFile(preparation.marker, 'utf8') !== preparation.owner) {
+    throw new Error('science-runtime: owner marker changed before Session scratch rollback')
+  }
+  if (rootExists) {
+    await privateDirectory(preparation.scratch.root)
+    await rm(preparation.scratch.root, { recursive: true, force: false })
+  }
+  await rm(preparation.marker, { force: false })
+  await syncDirectory(dirname(preparation.marker))
+}
+
+/**
+ * Plan one unique probe tree without creating any Host path.
+ * @param sessionScratch - Planned or existing retained Session paths.
+ * @returns Future private probe paths suitable for exact confinement wrapping.
+ */
+export function planProbeScratch(sessionScratch: ScienceSessionScratch): ScienceProbeScratch {
+  const directory = join(sessionScratch.probes, randomUUID())
+  return { directory, home: join(directory, 'home'), tmp: join(directory, 'tmp') }
 }
 
 /**
  * Create a unique private probe directory that may be removed after quiescence.
  * @param sessionScratch - Retained private root that owns the new probe directory.
+ * @param planned - Exact pre-wrapped probe paths, or a newly planned tree by default.
  * @returns Private probe paths for one unpublished observation.
  */
-export async function createProbeScratch(sessionScratch: ScienceSessionScratch): Promise<ScienceProbeScratch> {
-  const directory = join(sessionScratch.probes, randomUUID())
-  await createPrivateDirectory(directory)
-  const home = join(directory, 'home')
-  const tmp = join(directory, 'tmp')
-  await Promise.all([createPrivateDirectory(home), createPrivateDirectory(tmp)])
-  return { directory, home, tmp }
+export async function createProbeScratch(
+  sessionScratch: ScienceSessionScratch,
+  planned: ScienceProbeScratch = planProbeScratch(sessionScratch),
+): Promise<ScienceProbeScratch> {
+  if (!containsPath(sessionScratch.probes, planned.directory) || planned.directory === sessionScratch.probes
+    || planned.home !== join(planned.directory, 'home') || planned.tmp !== join(planned.directory, 'tmp')) {
+    throw new Error('science-runtime: planned probe paths escape the owned probes directory')
+  }
+  await createPrivateDirectory(planned.directory)
+  await Promise.all([createPrivateDirectory(planned.home), createPrivateDirectory(planned.tmp)])
+  return planned
+}
+
+/**
+ * Plan one run tree and source path without creating any Host path.
+ * @param sessionScratch - Planned or existing retained Session paths.
+ * @param runId - Provider-generated durable run identifier.
+ * @param language - Interpreter language selecting the source filename.
+ * @returns Future private run paths suitable for exact confinement wrapping.
+ */
+export function planRunScratch(
+  sessionScratch: ScienceSessionScratch,
+  runId: ScienceRunId,
+  language: ScienceLanguage,
+): ScienceRunScratch {
+  const name = String(runId)
+  const directory = join(sessionScratch.runs, name)
+  if (!containsPath(sessionScratch.runs, directory) || directory === sessionScratch.runs) {
+    throw new Error('science-runtime: run directory escapes the owned runs directory')
+  }
+  return {
+    ref: `runs/${name}/`,
+    directory,
+    source: join(directory, language === 'python' ? 'code.py' : 'code.R'),
+    tmp: join(directory, 'tmp'),
+    artifacts: join(directory, 'artifacts'),
+  }
 }
 
 /**
@@ -285,19 +416,12 @@ export async function createRunScratch(
   language: ScienceLanguage,
   code: Uint8Array,
 ): Promise<ScienceRunScratch> {
-  const name = String(runId)
-  const directory = join(sessionScratch.runs, name)
-  if (!containsPath(sessionScratch.runs, directory) || directory === sessionScratch.runs) {
-    throw new Error('science-runtime: run directory escapes the owned runs directory')
-  }
-  await createPrivateDirectory(directory)
-  const tmp = join(directory, 'tmp')
-  const artifacts = join(directory, 'artifacts')
-  await Promise.all([createPrivateDirectory(tmp), createPrivateDirectory(artifacts)])
-  const source = join(directory, language === 'python' ? 'code.py' : 'code.R')
-  await writePrivateFile(source, code)
-  await syncDirectory(directory)
-  return { ref: `runs/${name}/`, directory, source, tmp, artifacts }
+  const run = planRunScratch(sessionScratch, runId, language)
+  await createPrivateDirectory(run.directory)
+  await Promise.all([createPrivateDirectory(run.tmp), createPrivateDirectory(run.artifacts)])
+  await writePrivateFile(run.source, code)
+  await syncDirectory(run.directory)
+  return run
 }
 
 /**

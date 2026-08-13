@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto'
 import { lstat, readFile, realpath, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
-import { writableRoots } from '@deepseek-ai/dsh-sandbox'
+import { SandboxUnavailableError, writableRoots } from '@deepseek-ai/dsh-sandbox'
+import type { ConfinedArgv, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxProvider } from '@deepseek-ai/dsh-sandbox'
 import { canonicalizeWatchPath } from '@deepseek-ai/dsh-home-paths'
 import type { ScienceInterpreterBinding, ScienceLanguage } from '@deepseek-ai/dsh-science-session'
@@ -12,12 +12,31 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ScienceRuntimeError } from './types.ts'
 import type { ConfiguredProfile } from './config.ts'
-import { containsPath, createProbeScratch, pathsOverlap, removeProbeScratch } from './scratch.ts'
+import { containsPath, createProbeScratch, pathsOverlap, planProbeScratch, removeProbeScratch } from './scratch.ts'
 import type { ScienceProbeScratch, ScienceSessionScratch } from './scratch.ts'
 
 const VERSION_MAX_BYTES = 1_024
 const UTF8_PROBE_TEXT = 'dsh-科学-✓'
 const UNIX_EXECUTE_BITS = 0o111
+const POSIX_LOCALE = 'C.UTF-8'
+const CHILD_LOCALES: Record<NodeJS.Platform, string> = {
+  aix: POSIX_LOCALE, android: POSIX_LOCALE, darwin: 'en_US.UTF-8', freebsd: POSIX_LOCALE, haiku: POSIX_LOCALE,
+  linux: POSIX_LOCALE, netbsd: POSIX_LOCALE, openbsd: POSIX_LOCALE, sunos: POSIX_LOCALE, win32: POSIX_LOCALE, cygwin: POSIX_LOCALE,
+}
+const POSIX_LAYOUT = { python: ['bin', 'python'], r: ['bin', 'Rscript'] } as const
+const WINDOWS_LAYOUT = { python: ['python.exe'], r: ['Scripts', 'Rscript.exe'] } as const
+const EXECUTABLE_LAYOUTS: Record<NodeJS.Platform, typeof POSIX_LAYOUT | typeof WINDOWS_LAYOUT> = {
+  aix: POSIX_LAYOUT, android: POSIX_LAYOUT, darwin: POSIX_LAYOUT, freebsd: POSIX_LAYOUT, haiku: POSIX_LAYOUT,
+  linux: POSIX_LAYOUT, netbsd: POSIX_LAYOUT, openbsd: POSIX_LAYOUT, sunos: POSIX_LAYOUT, win32: WINDOWS_LAYOUT, cygwin: POSIX_LAYOUT,
+}
+const PATH_DIRECTORIES: Record<NodeJS.Platform, string> = {
+  aix: 'bin', android: 'bin', darwin: 'bin', freebsd: 'bin', haiku: 'bin', linux: 'bin',
+  netbsd: 'bin', openbsd: 'bin', sunos: 'bin', win32: 'Scripts', cygwin: 'bin',
+}
+const PATH_SUFFIXES: Record<NodeJS.Platform, string> = {
+  aix: ':/usr/bin:/bin', android: ':/usr/bin:/bin', darwin: ':/usr/bin:/bin', freebsd: ':/usr/bin:/bin', haiku: ':/usr/bin:/bin',
+  linux: ':/usr/bin:/bin', netbsd: ':/usr/bin:/bin', openbsd: ':/usr/bin:/bin', sunos: ':/usr/bin:/bin', win32: '', cygwin: ':/usr/bin:/bin',
+}
 
 /** Stable facts required to start a selected interpreter. */
 export interface ObservedInterpreter {
@@ -46,6 +65,34 @@ export interface ObservationServices {
   readonly sessionScratch: ScienceSessionScratch
   readonly sessionId: SessionId
   readonly signal: AbortSignal
+  /** Create or verify the planned Session tree after every required probe is fully wrapped. */
+  readonly prepareSessionScratch?: () => Promise<void>
+}
+
+interface StaticInterpreterFacts {
+  readonly prefix: string
+  readonly executable: string
+  readonly history: Uint8Array
+  readonly identity: string
+}
+
+interface PreparedProbeAttempt {
+  readonly scratch: ScienceProbeScratch
+  readonly version: ConfinedArgv
+  readonly utf8: ConfinedArgv
+}
+
+interface PreparedObservation {
+  readonly kind: 'probe'
+  readonly language: ScienceLanguage
+  readonly configuredPrefix: string
+  readonly staticFacts: StaticInterpreterFacts
+  readonly attempt: PreparedProbeAttempt
+}
+
+interface InvalidObservation {
+  readonly kind: 'invalid'
+  readonly value: ObservedInterpreter
 }
 
 /** Canonical direct argv for an interpreter version or Unicode proof. */
@@ -62,9 +109,10 @@ function probeArgv(language: ScienceLanguage, executable: string, kind: 'version
 
 /** Fixed locale for a supported POSIX host. */
 function localeEnvironment(): Pick<NodeJS.ProcessEnv, 'LANG' | 'LC_ALL' | 'TZ'> {
+  const locale = CHILD_LOCALES[process.platform]
   return {
-    LANG: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
-    LC_ALL: process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
+    LANG: locale,
+    LC_ALL: locale,
     TZ: 'UTC',
   }
 }
@@ -74,7 +122,7 @@ function probeEnvironment(prefix: string, scratch: ScienceProbeScratch): NodeJS.
   return {
     HOME: scratch.home,
     TMPDIR: scratch.tmp,
-    PATH: process.platform === 'win32' ? join(prefix, 'Scripts') : `${join(prefix, 'bin')}:/usr/bin:/bin`,
+    PATH: `${join(prefix, PATH_DIRECTORIES[process.platform])}${PATH_SUFFIXES[process.platform]}`,
     ...localeEnvironment(),
   }
 }
@@ -112,10 +160,7 @@ export async function assertProfileRunConfinement(
 
 /** Return the platform executable candidate for a configured language prefix. */
 function executableCandidate(language: ScienceLanguage, prefix: string): string {
-  if (process.platform === 'win32') {
-    return language === 'python' ? join(prefix, 'python.exe') : join(prefix, 'Scripts', 'Rscript.exe')
-  }
-  return join(prefix, 'bin', language === 'python' ? 'python' : 'Rscript')
+  return join(prefix, ...EXECUTABLE_LAYOUTS[process.platform][language])
 }
 
 /** Convert one fs bigint stat into the frozen executable identity serialization. */
@@ -150,14 +195,8 @@ async function runProbe(
   services: ObservationServices,
   prefix: string,
   scratch: ScienceProbeScratch,
-  argv: readonly string[],
+  confined: ConfinedArgv,
 ): Promise<{ readonly stdout: string; readonly stderr: string; readonly ok: boolean }> {
-  const policy = probePolicy(scratch, services.sessionId)
-  rejectWritableOverlap(prefix, policy)
-  const confined = services.sandbox.confine(argv, policy)
-  if (confined.enforcement !== 'full') {
-    throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science requires full sandbox enforcement')
-  }
   const handle = services.subprocess.spawn({
     argv: confined.argv,
     cwd: scratch.directory,
@@ -197,6 +236,30 @@ async function runProbe(
   return { stdout: stdout.text, stderr: stderr.text, ok: outcome.exitCode === 0 && outcome.signal === null }
 }
 
+/** Wrap one exact future probe before its private directory exists. */
+function confineProbe(
+  services: ObservationServices,
+  prefix: string,
+  scratch: ScienceProbeScratch,
+  argv: readonly string[],
+): ConfinedArgv {
+  const policy = probePolicy(scratch, services.sessionId)
+  rejectWritableOverlap(prefix, policy)
+  let confined: ConfinedArgv
+  try {
+    confined = services.sandbox.confine(argv, policy)
+  } catch (error) {
+    if (error instanceof SandboxUnavailableError) {
+      throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science requires an available full sandbox', { cause: error })
+    }
+    throw error
+  }
+  if (confined.enforcement !== 'full') {
+    throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science requires full sandbox enforcement')
+  }
+  return confined
+}
+
 /** Distinguish an absent or structurally unusable configured interpreter from provider I/O failure. */
 class StaticInterpreterUnavailableError extends Error {
   override name = 'StaticInterpreterUnavailableError'
@@ -204,18 +267,24 @@ class StaticInterpreterUnavailableError extends Error {
 
 /** Convert an ordinary missing path into an honest invalid binding, preserving other I/O failures. */
 function unavailableOnMissing(error: unknown, description: string): never {
-  const code = typeof error === 'object' && error !== null ? (error as { readonly code?: unknown }).code : undefined
-  if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
+  if (missingPathError(error)) {
     throw new StaticInterpreterUnavailableError(description)
   }
   throw error
+}
+
+/** Classify only filesystem missing-path errors as static interpreter unavailability. */
+function missingPathError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { readonly code?: unknown }).code
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP'
 }
 
 /** Check static prefix and executable facts before any child starts. */
 async function staticInterpreter(
   language: ScienceLanguage,
   configuredPrefix: string,
-): Promise<{ readonly prefix: string; readonly executable: string; readonly history: Uint8Array; readonly identity: string }> {
+): Promise<StaticInterpreterFacts> {
   let prefix: string
   try {
     prefix = await realpath(configuredPrefix)
@@ -261,9 +330,8 @@ async function staticInterpreter(
 }
 
 /** Build an honest static invalid record without creating a probe directory. */
-function staticFailure(language: ScienceLanguage, configuredPrefix: string, error: unknown): ObservedInterpreter {
-  const detail = error instanceof Error ? error.message : String(error)
-  const reason = detail.slice(0, 1_024)
+function staticFailure(language: ScienceLanguage, configuredPrefix: string, error: StaticInterpreterUnavailableError): ObservedInterpreter {
+  const reason = error.message.slice(0, 1_024)
   return {
     prefix: configuredPrefix,
     executable: executableCandidate(language, configuredPrefix),
@@ -271,34 +339,75 @@ function staticFailure(language: ScienceLanguage, configuredPrefix: string, erro
   }
 }
 
-/** Execute the frozen two-probe observation and calculate its binding digest. */
-async function observeStable(
+/** Plan and fully wrap one exact two-probe attempt before creating its paths. */
+function prepareProbeAttempt(
+  services: ObservationServices,
+  language: ScienceLanguage,
+  staticFacts: StaticInterpreterFacts,
+): PreparedProbeAttempt {
+  services.signal.throwIfAborted()
+  const scratch = planProbeScratch(services.sessionScratch)
+  if (language === 'r' && scratch.tmp.includes(' ')) {
+    throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'R probe TMPDIR cannot contain an ASCII space')
+  }
+  return {
+    scratch,
+    version: confineProbe(
+      services,
+      staticFacts.prefix,
+      scratch,
+      probeArgv(language, staticFacts.executable, 'version'),
+    ),
+    utf8: confineProbe(
+      services,
+      staticFacts.prefix,
+      scratch,
+      probeArgv(language, staticFacts.executable, 'utf8'),
+    ),
+  }
+}
+
+/** Resolve static facts and wrap the first exact attempt without creating scratch. */
+async function prepareObservation(
   services: ObservationServices,
   language: ScienceLanguage,
   configuredPrefix: string,
-): Promise<ObservedInterpreter> {
-  let staticFacts: Awaited<ReturnType<typeof staticInterpreter>>
+): Promise<PreparedObservation | InvalidObservation> {
+  let staticFacts: StaticInterpreterFacts
   try {
     staticFacts = await staticInterpreter(language, configuredPrefix)
   } catch (error) {
     if (error instanceof StaticInterpreterUnavailableError) {
-      return staticFailure(language, configuredPrefix, error)
+      return { kind: 'invalid', value: staticFailure(language, configuredPrefix, error) }
     }
     throw error
   }
   if (process.platform === 'win32') {
     throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science interpreter probes require a fully enforced Windows sandbox')
   }
+  return {
+    kind: 'probe',
+    language,
+    configuredPrefix,
+    staticFacts,
+    attempt: prepareProbeAttempt(services, language, staticFacts),
+  }
+}
+
+/** Execute pre-wrapped probes and calculate one stable binding digest. */
+async function observePrepared(
+  services: ObservationServices,
+  prepared: PreparedObservation,
+): Promise<ObservedInterpreter> {
+  const { language, configuredPrefix } = prepared
+  let staticFacts = prepared.staticFacts
+  let preparedAttempt = prepared.attempt
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    services.signal.throwIfAborted()
-    const scratch = await createProbeScratch(services.sessionScratch)
+    const scratch = await createProbeScratch(services.sessionScratch, preparedAttempt.scratch)
     let observationFailure: unknown
     try {
-      if (language === 'r' && scratch.tmp.includes(' ')) {
-        throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'R probe TMPDIR cannot contain an ASCII space')
-      }
-      const version = await runProbe(services, staticFacts.prefix, scratch, probeArgv(language, staticFacts.executable, 'version'))
-      const utf8 = await runProbe(services, staticFacts.prefix, scratch, probeArgv(language, staticFacts.executable, 'utf8'))
+      const version = await runProbe(services, staticFacts.prefix, scratch, preparedAttempt.version)
+      const utf8 = await runProbe(services, staticFacts.prefix, scratch, preparedAttempt.utf8)
       const normalized = version.ok ? normalizeVersion(version.stdout, version.stderr) : undefined
       const after = await staticInterpreter(language, configuredPrefix)
       const stable = after.prefix === staticFacts.prefix
@@ -308,6 +417,7 @@ async function observeStable(
       if (!stable) {
         if (attempt === 0) {
           staticFacts = after
+          preparedAttempt = prepareProbeAttempt(services, language, staticFacts)
           continue
         }
         return {
@@ -357,7 +467,26 @@ async function observeStable(
       }
     }
   }
+  /* v8 ignore next -- the bounded loop either returns, continues once, or throws. */
   throw new Error('science-runtime: stable observation exhausted unexpectedly')
+}
+
+/** Throw deterministic observation failures only after every sibling settles. */
+function assertObservationsSettled(settled: readonly PromiseSettledResult<unknown>[]): void {
+  const errors: unknown[] = []
+  for (const result of settled) {
+    if (result.status === 'rejected') errors.push(result.reason)
+  }
+  if (errors.length === 0) return
+  const [initiatingFailure, ...remaining] = errors
+  const initiatingError = initiatingFailure instanceof Error
+    ? initiatingFailure
+    : new Error('science-runtime: interpreter observation failed without an Error object')
+  if (errors.length === 1) throw initiatingError
+  throw new AggregateError(
+    [initiatingError, ...remaining],
+    'science-runtime: interpreter observations failed after all probe cleanup settled',
+  )
 }
 
 /**
@@ -370,45 +499,23 @@ export async function observeProfile(services: ObservationServices, profile: Con
   if (services.subprocess.executionWorld !== 'host-local') {
     throw new ScienceRuntimeError('CONFINEMENT_UNAVAILABLE', 'Science private Host scratch requires a host-local subprocess provider')
   }
-  const failures: unknown[] = []
-  const observe = (language: ScienceLanguage, prefix: string): Promise<ObservedInterpreter> => {
-    return observeStable(services, language, prefix).catch((error: unknown) => {
-      failures.push(error)
-      throw error
-    })
+  const preparations: Promise<PreparedObservation | InvalidObservation>[] = []
+  if (profile.pythonPrefix !== undefined) preparations.push(prepareObservation(services, 'python', profile.pythonPrefix))
+  if (profile.rPrefix !== undefined) preparations.push(prepareObservation(services, 'r', profile.rPrefix))
+  const prepared = await Promise.allSettled(preparations)
+  assertObservationsSettled(prepared)
+  const observations = await Promise.all(preparations)
+  if (observations.some(observation => observation.kind === 'probe')) {
+    await services.prepareSessionScratch?.()
   }
-  let python: ObservedInterpreter | undefined
-  let r: ObservedInterpreter | undefined
-  const observations: Promise<void>[] = []
-  if (profile.pythonPrefix !== undefined) {
-    observations.push(observe('python', profile.pythonPrefix).then((value) => {
-      python = value
-    }))
-  }
-  if (profile.rPrefix !== undefined) {
-    observations.push(observe('r', profile.rPrefix).then((value) => {
-      r = value
-    }))
-  }
-  const settled = await Promise.allSettled(observations)
-  const errors: unknown[] = []
-  for (const result of settled) {
-    if (result.status === 'rejected') errors.push(result.reason)
-  }
-  if (errors.length > 0) {
-    const initiatingFailure = failures[0] ?? errors[0]
-    const initiatingError = initiatingFailure instanceof Error
-      ? initiatingFailure
-      : new Error('science-runtime: interpreter observation failed without an Error object')
-    if (errors.length === 1) throw initiatingError
-    const remaining = [...errors]
-    const initiatingIndex = remaining.indexOf(initiatingFailure)
-    if (initiatingIndex >= 0) remaining.splice(initiatingIndex, 1)
-    throw new AggregateError(
-      [initiatingError, ...remaining],
-      'science-runtime: interpreter observations failed after all probe cleanup settled',
-    )
-  }
+  const executions = observations.map(async (observation) => {
+    return observation.kind === 'invalid' ? observation.value : observePrepared(services, observation)
+  })
+  const settled = await Promise.allSettled(executions)
+  assertObservationsSettled(settled)
+  const values = await Promise.all(executions)
+  const python = values.find(value => value.binding.language === 'python')
+  const r = values.find(value => value.binding.language === 'r')
   return {
     profile,
     ...(python === undefined ? {} : { python }),

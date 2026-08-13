@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PassThrough } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
-import { scrubbedParentEnv, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import { scrubbedParentEnv, SubprocessRuntime, utf8ValidityOf } from '@deepseek-ai/dsh-subprocess'
 import type {
   SubprocessHandle,
   SubprocessOutputRead,
@@ -104,5 +104,10 @@ describe('SubprocessRuntime seam', () => {
       delete process.env.SCRUB_PROBE_PASSWORD
       delete process.env.SCRUB_PROBE_PLAIN
     }
+  })
+
+  it('reports whether retained output bytes can be decoded as UTF-8 without replacement', () => {
+    expect(utf8ValidityOf(new TextEncoder().encode('dsh-科学-✓'))).toBe('valid')
+    expect(utf8ValidityOf(Uint8Array.of(0xff))).toBe('invalid')
   })
 })

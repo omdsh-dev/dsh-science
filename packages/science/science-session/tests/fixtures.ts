@@ -18,10 +18,10 @@ import type {
   ScienceRunTerminal,
 } from '../src/index.ts'
 
-export const HISTORY_SHA = 'a'.repeat(64)
+const HISTORY_SHA = 'a'.repeat(64)
 export const FINGERPRINT = 'b'.repeat(64)
-export const CODE_SHA = 'c'.repeat(64)
-export const SCRATCH_KEY = ScienceScratchKey('d'.repeat(64))
+const CODE_SHA = 'c'.repeat(64)
+const SCRATCH_KEY = ScienceScratchKey('d'.repeat(64))
 export const RUN_ID = ScienceRunId('run-1')
 export const CHART_ID = ScienceChartId('chart-1')
 export const RUN_CALL_ID = CallId('call-run')

@@ -16,7 +16,7 @@ import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as ScienceRuntimeInvariant from '../src/invariant.ts'
 import ScienceRuntime from '../src/index.ts'
-import { authorizePythonRun, createFakePythonPrefix, createFakeSandboxRunner } from './harness.ts'
+import { ControlledSubprocess, authorizePythonRun, createFakePythonPrefix, createFakeSandboxRunner } from './harness.ts'
 
 let root: string | undefined
 let context: Context | undefined
@@ -43,7 +43,7 @@ async function loadRuntime(): Promise<Context> {
     '    enabled: true',
     "- name: '@deepseek-ai/dsh-science-session'",
     "- name: '@deepseek-ai/dsh-science-session/invariant'",
-    "- name: '@deepseek-ai/dsh-subprocess-local'",
+    "- name: '@deepseek-ai/dsh-science-runtime/test-subprocess'",
     "- name: '@deepseek-ai/dsh-sandbox-local'",
     '  config:',
     `    runnerCommand: [${quote(runner)}]`,
@@ -67,7 +67,7 @@ async function loadRuntime(): Promise<Context> {
     ['@deepseek-ai/dsh-invariants', InvariantRegistry],
     ['@deepseek-ai/dsh-science-session', ScienceSessionPlugin],
     ['@deepseek-ai/dsh-science-session/invariant', ScienceSessionInvariant],
-    ['@deepseek-ai/dsh-subprocess-local', LocalSubprocessRuntime],
+    ['@deepseek-ai/dsh-science-runtime/test-subprocess', ControlledSubprocess],
     ['@deepseek-ai/dsh-sandbox-local', LocalSandboxProvider],
     ['@deepseek-ai/dsh-science-runtime', ScienceRuntime],
     ['@deepseek-ai/dsh-science-runtime/invariant', ScienceRuntimeInvariant],
@@ -88,13 +88,13 @@ async function loadRuntime(): Promise<Context> {
 }
 
 describe('Science Runtime real Loader composition', () => {
-  it('loads, binds, and runs through the folded Runtime with real local providers', async () => {
+  it('loads, binds, runs, and unloads the folded Runtime through Loader', async () => {
     const loaded = await loadRuntime()
     const unloaded = [...loaded.loader.entries()]
       .filter(entry => entry.fiber === undefined && !entry.disabled)
       .map(entry => entry.options.name)
     expect(unloaded).toEqual([])
-    expect(loaded.subprocess).toBeInstanceOf(LocalSubprocessRuntime)
+    expect(loaded.subprocess).toBeInstanceOf(ControlledSubprocess)
     expect(loaded.sandbox).toBeInstanceOf(LocalSandboxProvider)
     expect(loaded.scienceRuntime).toBeInstanceOf(ScienceRuntime)
     const session = loaded.sessions.create(SessionId('science-loader-composed'), { meta: { agentPreset: 'science' } })
@@ -129,5 +129,53 @@ describe('Science Runtime real Loader composition', () => {
       'science/run-started',
       'science/run-finished',
     ])
+    const runtimeEntry = [...loaded.loader.entries()].find(entry => entry.options.name === '@deepseek-ai/dsh-science-runtime')
+    if (runtimeEntry?.fiber === undefined) throw new Error('Science Runtime Loader entry is not active')
+    await runtimeEntry.fiber.dispose()
+    expect(loaded.scienceRuntime).toBeUndefined()
+  })
+
+  it('executes one confined child through the real local sandbox and subprocess providers', async () => {
+    root = await mkdtemp(join(process.cwd(), '.science-runtime-local-provider-'))
+    const runner = createFakeSandboxRunner(root)
+    context = new Context()
+    await context.plugin(LocalSubprocessRuntime)
+    await context.plugin(LocalSandboxProvider, {
+      runnerCommand: [runner],
+      runnerFailureSignatures: ['science-runtime fake runner failure'],
+    })
+    const confined = context.sandbox.confine(['/usr/bin/env'], {
+      mode: 'workspace-write', workspaceRoot: root, sessionId: SessionId('science-local-provider'),
+    })
+    expect(confined.enforcement).toBe('full')
+    process.env.SCIENCE_RUNTIME_LEAK = 'must-not-reach-real-local-providers'
+    try {
+      const handle = context.subprocess.spawn({
+        argv: confined.argv,
+        cwd: root,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: 1_024 },
+          stderr: { maxBytes: 1_024 },
+        },
+        graceMs: 3_000,
+        environmentBase: 'empty',
+        env: {
+          HOME: root,
+          TMPDIR: root,
+          PATH: '/usr/bin:/bin',
+          LANG: 'en_US.UTF-8',
+          LC_ALL: 'en_US.UTF-8',
+          TZ: 'UTC',
+        },
+      })
+      await expect(handle.done).resolves.toEqual({ exitCode: 0, signal: null })
+      await expect(handle.waitForExit()).resolves.toBe(true)
+      expect(handle.collected.stdout?.readFrom(0).text).toContain(`HOME=${root}\n`)
+      expect(handle.collected.stdout?.readFrom(0).text).not.toContain('SCIENCE_RUNTIME_LEAK=')
+      expect(handle.collected.stderr?.readFrom(0).text).toBe('')
+    } finally {
+      delete process.env.SCIENCE_RUNTIME_LEAK
+    }
   })
 })

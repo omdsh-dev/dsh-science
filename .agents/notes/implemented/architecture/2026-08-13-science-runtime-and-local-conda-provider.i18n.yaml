@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md
-2026-08-13-science-runtime-and-local-conda-provider.md: 698bdafae7766922a9e271a1db740595d1588a83
-2026-08-13-science-runtime-and-local-conda-provider.zh.md: b48ff6c82e05796ca9477eac511f0f6db7da3ccd
+2026-08-13-science-runtime-and-local-conda-provider.md: 091a9eed13cd58bb0f3e73a8d10bdfcbdfede43c
+2026-08-13-science-runtime-and-local-conda-provider.zh.md: 02ec5b4f697e75a01d8d9f6fab7e9f2b0bfb3971

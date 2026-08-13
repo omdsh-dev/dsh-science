@@ -43,6 +43,15 @@ describe('isRunnerSpawnFailure', () => {
     writeFileSync(fileWorkdir, 'x')
     expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: 'spawn', path: 'node' }, 'node', fileWorkdir)).toBe(false)
   })
+
+  it('requires an exact spawn syscall when the error omits or mismatches its path', () => {
+    const runner = join(workdir, 'runner')
+    expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: `spawn ${runner}` }, runner, workdir)).toBe(true)
+    expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: 'spawn' }, runner, workdir)).toBe(false)
+    expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: 'spawn', path: '' }, runner, workdir)).toBe(false)
+    expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: 'spawn', path: 1 }, runner, workdir)).toBe(false)
+    expect(isRunnerSpawnFailure({ code: 'ENOENT', syscall: 'spawn', path: `${runner}-other` }, runner, workdir)).toBe(false)
+  })
 })
 
 describe('classifyRunnerFailure', () => {

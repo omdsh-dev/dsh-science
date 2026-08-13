@@ -7,7 +7,7 @@ import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import * as ScienceSessionInvariant from '@deepseek-ai/dsh-science-session/invariant'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEventType } from '@deepseek-ai/dsh-session'
 import SandboxProvider from '@deepseek-ai/dsh-sandbox'
 import type { ConfinedArgv, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
 import { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
@@ -101,6 +101,35 @@ export class ControlledRun {
   complete(outcome: SubprocessOutcome): void {
     this.completion.resolve(outcome)
   }
+
+  /** Omit stdout from a published handle to model a malformed subprocess provider. */
+  omitStdout(): void {
+    const { stdout: _stdout, ...collected } = this.handle.collected
+    Object.defineProperty(this.handle, 'collected', { value: collected })
+  }
+
+  /** Resolve the published handle with a malformed non-outcome for failure classification coverage. */
+  resolveMalformedOutcome(): void {
+    Object.defineProperty(this.handle, 'done', { value: Promise.resolve(undefined) })
+  }
+
+  /** Reject the published completion before normal settlement. */
+  rejectCompletion(error: unknown): void {
+    Object.defineProperty(this.handle, 'done', { value: Promise.reject(error) })
+  }
+}
+
+/** Make exactly one test-owned Session append type fail before delegating every other event unchanged. */
+export function rejectSessionAppend(session: Session, rejectedType: SessionEventType, error: Error, beforeReject?: () => void): void {
+  const append = session.append.bind(session)
+  const intercept: typeof session.append = (type, data, ...opts) => {
+    if (type === rejectedType) {
+      beforeReject?.()
+      throw error
+    }
+    return append(type, data, ...opts)
+  }
+  Object.defineProperty(session, 'append', { value: intercept })
 }
 
 /** Exact retained collector facts for one controlled source process. */
