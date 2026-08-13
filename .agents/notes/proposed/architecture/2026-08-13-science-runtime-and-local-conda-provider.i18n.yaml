@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-13-science-runtime-and-local-conda-provider.md
-2026-08-13-science-runtime-and-local-conda-provider.md: d4bf34379d2340890d899e18d7c21d9d56673364
-2026-08-13-science-runtime-and-local-conda-provider.zh.md: dbce57e98121143d503f27c14da258e4e2d8698a

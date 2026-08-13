@@ -16,6 +16,7 @@ function spec(command: string, overrides: Partial<SubprocessSpawnSpec> = {}): Su
       stderr: { maxBytes: 64_000, spill: { maxBytes: 64 * 1024 * 1024 } },
     },
     graceMs: 200,
+    environmentBase: 'scrubbed-parent',
     ...overrides,
   }
 }
@@ -431,7 +432,9 @@ describe('LocalSubprocessRuntime', () => {
   it('loading a second implementation throws (one processes service per context — cordis standard)', async () => {
     const ctx = new Context()
     await ctx.plugin(LocalSubprocessRuntime)
-    class SecondManager extends LocalSubprocessRuntime {}
+    class SecondManager extends LocalSubprocessRuntime {
+      override readonly executionWorld = 'host-local' as const
+    }
     await expect(ctx.plugin(SecondManager)).rejects.toThrow(/service "subprocess" has been registered/)
   })
 })

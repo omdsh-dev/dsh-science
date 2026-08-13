@@ -97,6 +97,10 @@ The session log is the source of the context the model sees. `deriveMessages()` 
 
 Durable domain read models follow the same authority boundary. The domain owns one authoritative event fold and derives its public projection from that fold; the generic [session-projection registry](../packages/session/session-projection/README.md) owns live driving, watermarks, cache admission, and notification. A domain may provide a checkpoint-state schema to reject schema-invalid private cache rows, an encoded-watermark extractor to bind provenance-heavy state to its outer row seq, and a public-view change predicate when replay evidence advances without changing the served value. Persisted projection writes wait for the exact Session lifecycle's durable log drain and serialize per session id. Cached state is always a disposable shortcut, never a second source of truth. See the [Science Session domain](subsystems/science.md) for the provenance-heavy strict-fold example.
 
+The host-local [Science Runtime](../packages/science/science-runtime/README.md) owns the external facts that become Science environment and run events. It composes existing `ctx.subprocess` and `ctx.sandbox` providers, requires a host-local execution world and full confinement before it owns private Host scratch, and rechecks the exact live Session at each event commit. It has no model-facing Consumer; a later tool calls `ctx.scienceRuntime` rather than appending these facts itself.
+
+The [Science Mode execution chain](science-mode.md) maps that domain and Runtime onto the surrounding composition, prompt, tool, attachment, projection, and client extension points.
+
 ## Capability seams
 
 A **seam** is a swappable capability with three roles: a **Service Definition** declaring the interface, a **Service provider** implementing it, and a **Consumer** using it, commonly a model-facing tool. A package may combine roles, but one role alone is not a seam; adding a capability means designing all three ([capability graph](capability-seams.md)).
@@ -123,6 +127,7 @@ New behavior attaches to a documented extension point. Changing the loop itself 
 | Add UI or editor integration | drive `ctx.agents` and render from `session/event` |
 | Add a Web Client Chat node | register a `ConversationNodeDefinition` + keyed renderer |
 | Add durable session state | extend `SessionEventMap`; own one strict fold, then register its derived read model on `ctx.sessionProjections` when clients need it |
+| Add a host-local Science environment or fresh Python/R run | compose `ctx.scienceRuntime` with a host-local `ctx.subprocess`, a full `ctx.sandbox`, and the Science Session invariant; model-facing tools remain separate Consumers |
 | Generate session titles | register the sole `ctx.sessionTitle` provider |
 | Manage a same-session objective | use `ctx.goals`; continue through `agent/*` |
 | Fork a live session | `ctx.sessions.fork(source, boundary?, childSessionId?)` |

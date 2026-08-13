@@ -342,6 +342,7 @@ const reference = [
     ['docs/capability-seams.md', 'reference/capability-seams.md', '能力服务', 'Capability services', 2],
     ['docs/agent-lifecycle.md', 'reference/agent-lifecycle.md', 'Agent 生命周期', 'Agent lifecycle', 3],
     ['docs/tool-execution-pipeline.md', 'reference/tool-execution-pipeline.md', 'Tool 执行', 'Tool execution', 4],
+    ['docs/science-mode.md', 'reference/science-mode.md', 'Science Mode 链路', 'Science Mode chain', 5],
   ] as const).map(([source, route, rootLabel, enLabel, order]): PairedPage => ({
     source,
     route,

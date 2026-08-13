@@ -2,7 +2,7 @@
 
 [English](science.md) | 中文
 
-Science Session Domain 负责精简、读取时必需的事实及其确定性 projection。[Science MVP Decision Record](../../.agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md)负责分阶段产品决策；本页记录 [`@deepseek-ai/dsh-science-session`](../../packages/science/science-session/README.md) 已实现的持久词汇。
+Science Session Domain 负责精简、读取时必需的事实及其确定性 projection。[`@deepseek-ai/dsh-science-runtime`](../../packages/science/science-runtime/README.md) 负责观测已配置 Conda prefix 并通过该领域追加 environment/run fact 的 host-local operation。[Science Mode 执行链路](../science-mode.md)映射二者的跨子系统责任与扩展点；[Science MVP Decision Record](../../.agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md)负责分阶段产品决策。
 
 ## 标识与适用性
 
@@ -93,4 +93,40 @@ interface ScienceProjection {
 
 package root 只公开消费方所需的 durable identifier、event type、严格 decoder 与 replay result。mutable fold state、transition、witness construction、checkpoint validation 与 projection-state operation 保持内部可见。incremental apply 避免每条 live event 都执行 full-witness replay，但 immutable collection copy 与 witness retention 仍会随历史增长；实现不主张 constant-time，paging 或 compaction 要等测量结果证明需要时再引入。
 
-Phase 1 有意不提供 public mutation service、interpreter probe、process execution、Conda operation、Python 或 R execution、tool、prompt 或 UI。它的 generic infrastructure 变更严格位于 projection 与 persistence seam，以及传播这些契约所必需的 carrier signature：canonical private-state admission 与 state-to-row watermark binding、detached JSON value、显式 definition ownership、public-change suppression、durable lifecycle drain ordering、per-session operation serialization，以及 source-qualified log-revision identity。后续阶段的 producer 只能在外部事实到达规定的 commit point 后，追加六种 typed event 之一。
+runtime 是 Phase 2 中 `science/environment-bound`、`science/run-started` 与 `science/run-finished` 的唯一 owner。它要求精确的 live Session、direct argv、空 child environment base、full sandbox enforcement、私有 Host scratch，以及 terminal publication 前的整棵 process tree quiescence。它不添加 tool、prompt、preset、UI、chart 或 Outcome consumer；后续 Consumer 调用 `ctx.scienceRuntime`，而不是自行追加 runtime fact。
+
+<!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
+
+<a id="cordis-surface"></a>
+
+## Cordis API
+
+Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxscienceruntime--scienceruntime"></a>
+
+### `ctx.scienceRuntime` — `ScienceRuntime`
+
+Folded local Science Runtime provider with public types free of Host paths.
+
+```ts cordis-catalog
+/**
+ * Observe one configured existing Conda profile and append its whole-value
+ * environment revision. Static unusability becomes an honest `invalid`
+ * revision; capability, cancellation, and I/O failures append nothing.
+ * @param request - Exact live Session, profile identity, and caller signal.
+ * @returns The accepted durable environment revision.
+ */
+async bindEnvironment(request: BindScienceEnvironmentRequest): Promise<ScienceEnvironmentBinding>
+
+/**
+ * Publish a direct-argv run start, then settle exactly one matching terminal
+ * fact after the shared subprocess provider proves tree quiescence.
+ * @param request - Exact live Session, source, authorization facts, and cancellation.
+ * @returns A handle exposed only after `science/run-started` committed.
+ */
+async startRun(request: StartScienceRunRequest): Promise<ScienceRunHandle>
+```
+
+Source: [`packages/science/science-runtime/src/index.ts:64`](../../packages/science/science-runtime/src/index.ts)
+<!-- END GENERATED cordis-surface -->

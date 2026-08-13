@@ -362,7 +362,7 @@ export type Config = LocalConfig
 
 依赖：[`LocalConfig`](#deepseek-aidsh-bash-local)
 
-来源：[`packages/shell/bash-sandbox/src/index.ts:35`](../packages/shell/bash-sandbox/src/index.ts)
+来源：[`packages/shell/bash-sandbox/src/index.ts:40`](../packages/shell/bash-sandbox/src/index.ts)
 
 ## `@deepseek-ai/dsh-client-connection`
 
@@ -579,7 +579,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/goal/goal/src/index.ts:116`](../packages/goal/goal/src/index.ts)
+来源：[`packages/goal/goal/src/index.ts:118`](../packages/goal/goal/src/index.ts)
 
 ## `@deepseek-ai/dsh-headless`
 
@@ -1316,7 +1316,7 @@ export type Config = LocalConfig
 
 依赖：[`LocalConfig`](#deepseek-aidsh-pwsh-local)
 
-来源：[`packages/shell/pwsh-sandbox/src/index.ts:40`](../packages/shell/pwsh-sandbox/src/index.ts)
+来源：[`packages/shell/pwsh-sandbox/src/index.ts:45`](../packages/shell/pwsh-sandbox/src/index.ts)
 
 ## `@deepseek-ai/dsh-repeat-tool-reminder`
 
@@ -1405,6 +1405,32 @@ export interface Config {
 
 来源：[`packages/sandbox/sandbox-policy/src/index.ts:67`](../packages/sandbox/sandbox-policy/src/index.ts)
 
+## `@deepseek-ai/dsh-science-runtime`
+
+需要：`sessions` · `subprocess` · `sandbox`
+
+```ts config-catalog
+/** Runtime configuration supplied by one Cordis row. */
+export interface Config {
+  /** Explicit Harness home; omitted follows the shared resolver. */
+  readonly dshHome?: string
+  /** Non-empty map of profile identifiers to existing language prefixes. */
+  readonly profiles: Readonly<Record<string, ScienceEnvironmentProfileConfig>>
+  /** One caller-independent bound for bind and run operations. */
+  readonly timeoutMs?: number
+}
+
+/** One allowlisted existing Conda prefix. */
+export interface ScienceEnvironmentProfileConfig {
+  /** Existing prefix containing `bin/python` or `python.exe`. */
+  readonly pythonPrefix?: string
+  /** Existing prefix containing `bin/Rscript` or `Scripts/Rscript.exe`. */
+  readonly rPrefix?: string
+}
+```
+
+来源：[`packages/science/science-runtime/src/config.ts:24`](../packages/science/science-runtime/src/config.ts)
+
 ## `@deepseek-ai/dsh-sdk-jsonrpc-server`
 
 需要：`agents`
@@ -1462,7 +1488,7 @@ export interface Config {
 export type JsonlCompression = 'zstd' | 'none'
 ```
 
-来源：[`packages/session/session-persistence-jsonl/src/index.ts:60`](../packages/session/session-persistence-jsonl/src/index.ts)
+来源：[`packages/session/session-persistence-jsonl/src/index.ts:61`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ## `@deepseek-ai/dsh-session-persistence-sqlite`
 
@@ -1526,7 +1552,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/session-projection-cache/src/index.ts:42`](../packages/session/session-projection-cache/src/index.ts)
+来源：[`packages/session/session-projection-cache/src/index.ts:44`](../packages/session/session-projection-cache/src/index.ts)
 
 ## `@deepseek-ai/dsh-session-query-sqlite`
 
@@ -1644,7 +1670,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/session-title/src/index.ts:79`](../packages/session/session-title/src/index.ts)
+来源：[`packages/session/session-title/src/index.ts:81`](../packages/session/session-title/src/index.ts)
 
 ## `@deepseek-ai/dsh-session-title-all-prompts-llm`
 

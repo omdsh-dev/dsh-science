@@ -442,6 +442,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Runs one model-written program against host-provided async bindings; backends differ by substrate and language (the tool registry consumes it for Code Mode).',
   },
   {
+    key: 'scienceRuntime',
+    pkg: 'science-runtime',
+    title: 'Host-local Science Runtime operations',
+    mode: 'core',
+    consumers: [],
+    note: 'The folded Phase 2 provider observes configured local Conda prefixes and appends Science environment/run facts through shared subprocess and sandbox services; it has no model-facing Consumer or shipped profile entry.',
+  },
+  {
     key: 'fs',
     pkg: 'fs',
     title: 'Filesystem provider seam',

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md
-2026-08-12-science-mode-core-mvp.md: 515e02d4db845aa9669b146141accdcda680ea45
-2026-08-12-science-mode-core-mvp.zh.md: f4392fcd69149436ed5123a326dda38a5dfdfe37
+2026-08-12-science-mode-core-mvp.md: 82347f6ae1b2f2d5f2b91a62025e0a470049a2a9
+2026-08-12-science-mode-core-mvp.zh.md: d43ff8502ac6bcfc485af3f867ccc1f47866830e

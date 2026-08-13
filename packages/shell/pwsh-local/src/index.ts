@@ -236,6 +236,7 @@ export class PwshLocalExecutor extends ShellExecutor {
         stderr: collect(this.config.maxOutputBytes),
       },
       graceMs: this.config.graceMs,
+      environmentBase: 'scrubbed-parent',
       signal,
       env: { ...ENV_OVERRIDES, ...spec.env, ...spec.dshEnv },
     }

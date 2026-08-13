@@ -16,6 +16,23 @@ The first release must also avoid implying parity with Claude Science. Persisten
 
 Add Science Mode as four cooperating layers: a Science preset and model-facing tools, a Runtime that binds existing Conda prefixes, a Science Session domain, and a client view in the existing Details column. The Session log is the only durable authority. Runtime handles and mutable scratch files remain process or filesystem state and never become a second Session database.
 
+The [Science Mode execution chain](../../../../docs/science-mode.md) is the current-source map of the cross-subsystem extension points. This record owns the complete MVP responsibility graph and staged delivery decisions.
+
+```mermaid
+flowchart LR
+  Preset["Science preset"] --> Mode["science/mode-bound"]
+  Mode --> Context["Logged Science context"]
+  Context --> Tools["Science tool Consumer"]
+  Tools --> Runtime["ctx.scienceRuntime"]
+  Runtime --> RunFacts["Environment and run events"]
+  Tools --> Attachments["Immutable PNG attachments"]
+  Tools --> Publications["Chart and Outcome events"]
+  RunFacts --> Projection["science projection"]
+  Publications --> Projection
+  Attachments --> Projection
+  Projection --> UI["Science Details view"]
+```
+
 Development advances one phase at a time. Every phase receives a separate local commit, focused verification, fresh independent review, and a stop before the next phase. The Science work is seeded from the exact 2026-08-13 DSH snapshot `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` in a standalone local repository with no configured remote. It does not modify the existing DSH working tree, create a public repository, touch `dsh-external`, or upload changes.
 
 ## Product decisions
@@ -35,7 +52,7 @@ Development advances one phase at a time. Every phase receives a separate local 
 | Package | Responsibility in the complete MVP |
 |---|---|
 | `@deepseek-ai/dsh-science-session` | The only durable Science record, event, and projection types; one strict event-stream fold; Session applicability policy; derived projection; and invariant companion |
-| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime` plus the sole local Conda implementation: observation, exact-Session leases, scratch, direct-argv orchestration, and result classification. Exported types stay free of Host scratch paths. A second provider, or a production Consumer that would otherwise import local-only types, is the split trigger; see the [Phase 2 architecture note](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) |
+| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime` plus the sole local Conda implementation: observation, exact-Session leases, scratch, direct-argv orchestration, and result classification. Exported types stay free of Host scratch paths. A second provider, or a production Consumer that would otherwise import local-only types, is the split trigger; see the [Phase 2 architecture note](../../implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md) |
 | `@deepseek-ai/dsh-tool-science` | Model-visible Science tools that call the domain and runtime services without spawning directly |
 | `@deepseek-ai/dsh-client-ui-science` | Read-only projection consumption and the four Science Details tabs |
 | Built-in Science preset | Per-session prompt and tool composition; Host-plane runtime and projection services remain outside the isolated preset |
@@ -121,8 +138,8 @@ The hard guarantees are narrower: no automatic package installation or environme
 |---|---|---|
 | 0 | Freeze this decision and establish isolated local source | Formal Agent Note committed; no product code |
 | 1 | Science Session events, types, strict fold, projection, invariants, and replay tests | Malformed or discontinuous streams fail loudly; live and cold results match; no public mutation service, UI, model, process, Conda, Python, or R work |
-| 2 | [Runtime Service Definition and local Conda provider](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | Fake-prefix CI coverage plus separately reported real-machine acceptance; owned trees settle; environment prefixes remain unchanged |
-| 3 | Core compaction prerequisite, Science preset, prompt, state query, and Python/R tools | Science prompt and tools are preset-scoped and every used environment context is durable and model-visible |
+| 2 | [Runtime Service Definition and local Conda provider](../../implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | Fake-prefix CI coverage plus separately reported real-machine acceptance; owned trees settle; environment prefixes remain unchanged |
+| 3 | [Core compaction prerequisite, Science preset, prompt, state query, and Python/R tools](2026-08-13-science-preset-environment-context-and-run-tools.md) | Science prompt and tools are preset-scoped and every used environment context is durable and model-visible |
 | 4 | PNG save and Outcome publication consumers | Immutable versions and backward evidence validation replay identically |
 | 5 | Generic Details extension and Science client UI | Four accessible tabs render only projection truth; Standard sessions have no entry |
 | 6 | Composition, built-package checks, local MVP source closure | All named source checks pass and fresh review has no HIGH or BLOCK finding; publishing remains separately authorized |

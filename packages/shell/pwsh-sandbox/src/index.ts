@@ -27,7 +27,12 @@ import type {
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { PwshLocalExecutor } from '@deepseek-ai/dsh-pwsh-local'
 import type { Config as LocalConfig } from '@deepseek-ai/dsh-pwsh-local'
-import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure, matchesSignature } from './helpers.ts'
+import {
+  classifyDenial,
+  classifyRunnerFailure,
+  isRunnerSpawnFailure,
+  matchesSignature,
+} from '@deepseek-ai/dsh-sandbox'
 
 /**
  * Plugin config: the local executor's knobs, verbatim. The sandbox policy —
@@ -118,7 +123,14 @@ export class SandboxPwshExecutor extends PwshLocalExecutor {
     if (runnerFailure !== undefined) {
       throw new SandboxUnavailableError(mode, runnerFailure.detail)
     }
-    return { ...result, sandbox: { mode, denied: classifyDenial(result, confined.denialSignatures), enforcement: confined.enforcement } }
+    return {
+      ...result,
+      sandbox: {
+        mode,
+        denied: classifyDenial(result.exitCode, result.stderr.text, confined.denialSignatures),
+        enforcement: confined.enforcement,
+      },
+    }
   }
 
   override start(spec: ShellExecSpec): ShellProcess {

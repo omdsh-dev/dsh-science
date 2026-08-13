@@ -15,7 +15,7 @@ Groups hold `packages/<group>/<pkg>/`; names stay `@deepseek-ai/dsh-<pkg>`. **Gr
 | [`typert/`](typert/README.md) | Type graph generation, artifact loading, and runtime registry | Product — stable API |
 | [`goal/`](goal/README.md) | Same-session goal persistence and lifecycle | Product — stable API |
 | [`schedule/`](schedule/README.md) | Session-local scheduled follow-ups | Product — stable API |
-| [`science/`](science/README.md) | Durable Science session facts, strict replay, and projection | Product — stable API |
+| [`science/`](science/README.md) | Durable Science session facts, strict replay, projection, and the host-local Runtime | Product — stable API |
 | [`feedback/`](feedback/README.md) | Human feedback | Product — stable API |
 | [`identity/`](identity/README.md) | Shared anonymous identity | Product — stable API |
 | [`llm/`](llm/README.md) | LLM capability family: the abstract service + provider adapters | Product — stable API |

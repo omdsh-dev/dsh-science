@@ -56,6 +56,7 @@ function spec(command: string, overrides: SpecOverrides = {}) {
       stderr: { maxBytes: stderrMaxBytes, spill: { maxBytes: maxSpillBytes } },
     },
     graceMs: 3_000,
+    environmentBase: 'scrubbed-parent' as const,
     ...rest,
   }
 }
@@ -342,6 +343,20 @@ describe('stdin and extra env (set by in-process plugins)', () => {
       env: { EXTRA_ONE: 'alpha', EXTRA_TWO: 'beta' },
     })))
     expect(result.stdout.text).toBe('alpha/beta\n')
+  })
+
+  it('starts an empty-base child with only its explicit environment entries', async () => {
+    process.env.SUBPROCESS_EMPTY_BASE_SENTINEL = 'ambient-value'
+    try {
+      const result = await finish(spawnSubprocess({
+        ...spec('unused', { environmentBase: 'empty', env: { SUBPROCESS_EMPTY_BASE_EXPLICIT: 'present' } }),
+        argv: [process.execPath, '--input-type=module', '--eval',
+          'process.stdout.write(JSON.stringify([process.env.SUBPROCESS_EMPTY_BASE_SENTINEL ?? "absent", process.env.SUBPROCESS_EMPTY_BASE_EXPLICIT]))'],
+      }))
+      expect(result.stdout.text).toBe('["absent","present"]')
+    } finally {
+      delete process.env.SUBPROCESS_EMPTY_BASE_SENTINEL
+    }
   })
 
   it('lets an explicit tombstone remove an ordinary ambient env entry', async () => {

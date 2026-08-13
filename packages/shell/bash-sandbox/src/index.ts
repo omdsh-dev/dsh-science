@@ -23,7 +23,12 @@ import type {
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import type { Config as LocalConfig } from '@deepseek-ai/dsh-bash-local'
-import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure, matchesSignature } from './helpers.ts'
+import {
+  classifyDenial,
+  classifyRunnerFailure,
+  isRunnerSpawnFailure,
+  matchesSignature,
+} from '@deepseek-ai/dsh-sandbox'
 
 /**
  * Plugin config: the local executor's knobs, verbatim. The sandbox policy —
@@ -110,7 +115,14 @@ export class SandboxBashExecutor extends LocalBashExecutor {
     if (runnerFailure !== undefined) {
       throw new SandboxUnavailableError(mode, runnerFailure.detail)
     }
-    return { ...result, sandbox: { mode, denied: classifyDenial(result, confined.denialSignatures), enforcement: confined.enforcement } }
+    return {
+      ...result,
+      sandbox: {
+        mode,
+        denied: classifyDenial(result.exitCode, result.stderr.text, confined.denialSignatures),
+        enforcement: confined.enforcement,
+      },
+    }
   }
 
   override start(spec: ShellExecSpec): ShellProcess {

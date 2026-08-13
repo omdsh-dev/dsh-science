@@ -124,6 +124,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/session/session-projection-cache': { kind: 'none', reason: 'The persisted cache accelerates host-side cold reads of projection state and registers nothing model-facing.' },
   'packages/session/session-stats': { kind: 'none', reason: 'The sessionStats unit folds already-logged step boundaries into a client-facing read model and registers nothing model-facing.' },
   'packages/science/science-session': { kind: 'none', reason: 'The package validates and projects already-logged Science facts without registering model context.' },
+  'packages/science/science-runtime': { kind: 'none', reason: 'The runtime exposes non-model-facing operations for a later Science tool Consumer and registers no prompt context.' },
   'packages/session-query/session-query': { kind: 'none', reason: 'The trusted query service exposes cloned records only to callers and registers nothing model-facing.' },
   'packages/session-query/session-query-sqlite': { kind: 'none', reason: 'The search backend returns hits only to callers and registers nothing model-facing.' },
   'packages/settings/settings': { kind: 'indirect', reason: 'The seam stores and resolves user settings; consumer plugins own any model-facing content fed by a value.' },

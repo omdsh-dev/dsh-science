@@ -2,7 +2,7 @@
 
 English | [中文](science.zh.md)
 
-The Science Session Domain owns compact, required-on-read facts and their deterministic projection. The [Science MVP Decision Record](../../.agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md) owns the staged product decisions; this page records the durable vocabulary implemented by [`@deepseek-ai/dsh-science-session`](../../packages/science/science-session/README.md).
+The Science Session Domain owns compact, required-on-read facts and their deterministic projection. [`@deepseek-ai/dsh-science-runtime`](../../packages/science/science-runtime/README.md) owns the host-local operation that observes configured Conda prefixes and appends environment/run facts through that domain. The [Science Mode execution chain](../science-mode.md) maps their cross-subsystem responsibilities and extension points; the [Science MVP Decision Record](../../.agents/notes/proposed/feature/2026-08-12-science-mode-core-mvp.md) owns the staged product decisions.
 
 ## Identity and applicability
 
@@ -93,4 +93,40 @@ interface ScienceProjection {
 
 The package root exposes the durable identifiers, event types, strict decoders, and replay result that consumers need. Mutable fold state, transitions, witness construction, checkpoint validation, and projection-state operations stay internal. Incremental application avoids full-witness replay on every live event, but immutable collection copying and witness retention still grow with history; the implementation makes no constant-time claim and defers paging or compaction until measurement warrants it.
 
-Phase 1 deliberately provides no public mutation service, interpreter probe, process execution, Conda operation, Python or R execution, tool, prompt, or UI. Its generic infrastructure changes stay inside the projection and persistence seams, plus the carrier signatures required to propagate those contracts: canonical private-state admission and state-to-row watermark binding, detached JSON values, explicit definition ownership, public-change suppression, durable lifecycle drain ordering, per-session operation serialization, and source-qualified log-revision identity. Producers in later phases may append one of the six typed events only after the external fact it describes has reached its documented commit point.
+The runtime is the only Phase 2 owner of `science/environment-bound`, `science/run-started`, and `science/run-finished`. It requires an exact live Session, direct argv, an empty child environment base, full sandbox enforcement, private Host scratch, and whole-tree quiescence before terminal publication. It does not add a tool, prompt, preset, UI, chart, or Outcome consumer; later Consumers call `ctx.scienceRuntime` rather than appending runtime facts themselves.
+
+<!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
+
+<a id="cordis-surface"></a>
+
+## Cordis API
+
+Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxscienceruntime--scienceruntime"></a>
+
+### `ctx.scienceRuntime` — `ScienceRuntime`
+
+Folded local Science Runtime provider with public types free of Host paths.
+
+```ts cordis-catalog
+/**
+ * Observe one configured existing Conda profile and append its whole-value
+ * environment revision. Static unusability becomes an honest `invalid`
+ * revision; capability, cancellation, and I/O failures append nothing.
+ * @param request - Exact live Session, profile identity, and caller signal.
+ * @returns The accepted durable environment revision.
+ */
+async bindEnvironment(request: BindScienceEnvironmentRequest): Promise<ScienceEnvironmentBinding>
+
+/**
+ * Publish a direct-argv run start, then settle exactly one matching terminal
+ * fact after the shared subprocess provider proves tree quiescence.
+ * @param request - Exact live Session, source, authorization facts, and cancellation.
+ * @returns A handle exposed only after `science/run-started` committed.
+ */
+async startRun(request: StartScienceRunRequest): Promise<ScienceRunHandle>
+```
+
+Source: [`packages/science/science-runtime/src/index.ts:64`](../../packages/science/science-runtime/src/index.ts)
+<!-- END GENERATED cordis-surface -->

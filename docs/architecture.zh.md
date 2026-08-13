@@ -97,6 +97,10 @@ turn/end
 
 持久领域读取模型遵守同一条权威边界。领域拥有唯一的权威事件折叠，并从该折叠派生公开投影；通用的 [session-projection 注册表](../packages/session/session-projection/README.md)拥有 live 驱动、水位线、缓存准入与通知。领域可以提供 checkpoint 状态 schema 以拒绝 schema-invalid 的私有缓存行，为 provenance 较重的状态提供内嵌水位 extractor 以绑定外层缓存行 seq，也可以在回放证据推进而公开值不变时提供公开 view 变化断言。持久投影写入会等待该精确 Session lifecycle 的日志持久排空，并按 session id 串行化。缓存状态永远只是可丢弃的捷径，不是第二份事实来源。带有完整 provenance 严格折叠的示例见 [Science Session 领域](subsystems/science.md)。
 
+host-local 的 [Science Runtime](../packages/science/science-runtime/README.md) 拥有会成为 Science environment 和 run event 的外部事实。它组合既有的 `ctx.subprocess` 与 `ctx.sandbox` provider，在拥有私有 Host scratch 前要求 host-local execution world 与 full confinement，并在每次 event commit 时重新检查精确的 live Session。它没有面向模型的 Consumer；后续工具调用 `ctx.scienceRuntime`，而不是自行追加这些 fact。
+
+[Science Mode 执行链路](science-mode.md)把该领域与 Runtime 映射到周围的 composition、prompt、tool、attachment、projection 和 client 扩展点。
+
 ## 能力 seam
 
 一个 **seam** 是一项可替换能力，包含三种角色：声明接口的 **Service Definition**、实现它的 **Service provider**，以及使用它的 **Consumer**（通常是面向模型的工具）。一个包可以合并承担多个角色，但单一角色本身不是 seam；添加一项能力意味着把三者一并设计（[能力图](capability-seams.md)）。
@@ -123,6 +127,7 @@ seam 正是替换一个提供方就能改变整个产品的原因。文件系统
 | 添加 UI 或编辑器集成 | 驱动 `ctx.agents` 并从 `session/event` 渲染 |
 | 添加 Web Client Chat 节点 | 注册 `ConversationNodeDefinition` + keyed renderer |
 | 添加持久会话状态 | 扩展 `SessionEventMap`；拥有唯一严格折叠，并在客户端需要时把派生读取模型注册到 `ctx.sessionProjections` |
+| 添加 host-local Science environment 或全新 Python/R run | 将 `ctx.scienceRuntime` 与 host-local `ctx.subprocess`、full `ctx.sandbox` 及 Science Session invariant 组合；面向模型的工具仍是独立 Consumer |
 | 生成会话标题 | 注册唯一的 `ctx.sessionTitle` 提供方 |
 | 管理同会话目标 | 使用 `ctx.goals`；通过 `agent/*` 续跑 |
 | fork 活跃会话 | `ctx.sessions.fork(source, boundary?, childSessionId?)` |

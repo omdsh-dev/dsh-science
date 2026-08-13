@@ -498,20 +498,54 @@ function walkSchemaExpr(
   return { keys, composes }
 }
 
+/** Resolve a locally imported schema constant to its owning module expression. */
+function resolveLocalSchemaExpr(
+  ctx: FileCtx,
+  expression: ts.Expression,
+  cache: Map<string, FileCtx>,
+): { ctx: FileCtx; expression: ts.Expression } {
+  const unwrapped = unwrapExpr(expression)
+  if (!ts.isIdentifier(unwrapped)) return { ctx, expression: unwrapped }
+  const imported = ctx.imports.get(unwrapped.text)
+  if (imported === undefined || !imported.specifier.startsWith('.') || !imported.specifier.endsWith('.ts')) {
+    return { ctx, expression: unwrapped }
+  }
+  const target = loadFile(
+    resolve(dirname(ctx.abs), imported.specifier),
+    ctx.rel.slice(0, ctx.rel.lastIndexOf('/') + 1) + imported.specifier.replace(/^\.\//, ''),
+    cache,
+  )
+  for (const statement of target.sf.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === imported.imported && declaration.initializer) {
+        return { ctx: target, expression: declaration.initializer }
+      }
+    }
+  }
+  return { ctx, expression: unwrapped }
+}
+
 /** Find a plugin's schemastery schema expression: an exported `const Config`
  * in the entry file, else a `static Config` on the plugin class. */
-function findSchemaExpr(ctx: FileCtx, pluginClass: ts.ClassDeclaration | null): ts.Expression | null {
+function findSchemaExpr(
+  ctx: FileCtx,
+  pluginClass: ts.ClassDeclaration | null,
+  cache: Map<string, FileCtx>,
+): { ctx: FileCtx; expression: ts.Expression } | null {
   for (const stmt of ctx.sf.statements) {
     if (!ts.isVariableStatement(stmt)) continue
     if (!stmt.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) continue
     for (const decl of stmt.declarationList.declarations) {
-      if (ts.isIdentifier(decl.name) && decl.name.text === 'Config' && decl.initializer) return decl.initializer
+      if (ts.isIdentifier(decl.name) && decl.name.text === 'Config' && decl.initializer) {
+        return resolveLocalSchemaExpr(ctx, decl.initializer, cache)
+      }
     }
   }
   for (const member of pluginClass?.members ?? []) {
     if (!ts.isPropertyDeclaration(member) || member.name.getText() !== 'Config') continue
     if (!member.modifiers?.some(m => m.kind === ts.SyntaxKind.StaticKeyword)) continue
-    if (member.initializer) return member.initializer
+    if (member.initializer) return resolveLocalSchemaExpr(ctx, member.initializer, cache)
   }
   return null
 }
@@ -716,9 +750,9 @@ export function collectConfigCatalog(scanRoot: string = root): CatalogEntry[] {
     entry.refs = [...refs.values()].sort((a, b) => a.alias.localeCompare(b.alias))
 
     // Statically walk the runtime schema (when one exists) for the subset check.
-    const schemaExpr = findSchemaExpr(ctx, pluginClass)
+    const schemaExpr = findSchemaExpr(ctx, pluginClass, cache)
     if (schemaExpr) {
-      const { keys, composes } = walkSchemaExpr(ctx, unwrapExpr(schemaExpr), `${pkg} (${entryRel})`, violations)
+      const { keys, composes } = walkSchemaExpr(schemaExpr.ctx, unwrapExpr(schemaExpr.expression), `${pkg} (${entryRel})`, violations)
       entry.schemaKeys = keys
       entry.schemaComposes = composes
     } else {

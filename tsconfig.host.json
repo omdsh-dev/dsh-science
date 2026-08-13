@@ -171,6 +171,7 @@
     { "path": "./packages/feedback/command-feedback" },
     { "path": "./packages/schedule/schedule" },
     { "path": "./packages/science/science-session" },
+    { "path": "./packages/science/science-runtime" },
     { "path": "./packages/context/time-context" },
     { "path": "./packages/context/tmux-context" },
     { "path": "./packages/context/session-reference" },

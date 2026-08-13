@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-08-13-science-preset-environment-context-and-run-tools.md
-2026-08-13-science-preset-environment-context-and-run-tools.md: 6d8c5b6b24b4effecc821699b65263fdb9d6e05f
-2026-08-13-science-preset-environment-context-and-run-tools.zh.md: bbe1f43bb8ec58b7384d4c036944ff4e5e9767e8
+2026-08-13-science-preset-environment-context-and-run-tools.md: 86520a33a49c0a3437a4075ac8948fda2877c5fa
+2026-08-13-science-preset-environment-context-and-run-tools.zh.md: e81bef49ec197287a0fbbd3b95b2b9f8323fb975

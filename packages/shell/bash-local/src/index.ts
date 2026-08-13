@@ -189,6 +189,7 @@ export class LocalBashExecutor extends ShellExecutor {
         stderr: collect(this.config.maxOutputBytes),
       },
       graceMs: this.config.graceMs,
+      environmentBase: 'scrubbed-parent',
       signal,
       // One explicit env map for the seam, layered so the trusted dshEnv
       // snapshot beats both the caller's env and the terminal overrides; the

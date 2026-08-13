@@ -10,7 +10,7 @@ Science Phase 2 提供 durable Session domain 与 Host-local Runtime，但有意
 
 实现前必须明确四项决策。Phase 2 checkpoint 包含共享 subprocess 与 sandbox 基础设施，而不只是 `packages/science/*`；只读 filesystem 入口需要有依据的 package identity；首次 environment observation 在 prompt assembly 内执行 Host I/O，而不是在 Session 构造时执行；最终审查必须由未参与 candidate 实现的 clean-context reviewer 完成。任何一项保持隐含，都会让两个看似正确的实现采用不同 baseline、plugin topology、request ordering 或 evidence standard。
 
-本记录是 Terre 的 Phase 3 执行依据。它细化 [Science Mode 核心 MVP](2026-08-12-science-mode-core-mvp.md) 中的 Phase 3 行，并依赖 [Phase 2 Runtime 设计](../../proposed/architecture/2026-08-13-science-runtime-and-local-conda-provider.md)。它只授权设计与本地实现，不授权 remote、push、publish、tag、release、package installation、real credential 使用、Conda mutation 或 Phase 4 chart/Outcome 工作。
+本记录是 Terre 的 Phase 3 执行依据。它细化 [Science Mode 核心 MVP](2026-08-12-science-mode-core-mvp.md) 中的 Phase 3 行，并依赖 [Phase 2 Runtime 设计](../../implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md)。它只授权设计与本地实现，不授权 remote、push、publish、tag、release、package installation、real credential 使用、Conda mutation 或 Phase 4 chart/Outcome 工作。
 
 ## 提案
 
@@ -52,7 +52,7 @@ flowchart LR
 
 各 slice 必须按此顺序推进，因为 C3.3 依赖 C3.1 的 same-request context delivery，C3.4 又依赖两个 plugin entry。Terre 必须在每个 slice 后审查实际 diff，在同一个 slice 中更新受影响 README 与 JSDoc，并把非平凡 implementation rationale 保存在本 Agent Note 或后续取代它的 decision record 中。generated file 通过其 owning generator 更新，不得手改。
 
-预期 file plan 是具体的，但 repository convention 要求时允许采用更小的等效拆分。C3.1 修改 `packages/core/agent-loop/src/agent.ts`、聚焦 loop/runtime-context test 与 agent-loop README pair。C3.2 增加 `packages/fs/tool-fs/src/read-only.ts` 与一个共享 config resolver，调整 `src/index.ts`、`package.json`、build configuration、README pair，以及独立 source/built-entry test。C3.3 为 `packages/science/tool-science` 创建惯例要求的 `package.json`、`tsconfig.json`、`src/index.ts`、config/context/tool module、test、README pair 与 invariant companion；当 package 不拥有额外 authoritative mutable relationship 时，companion 不得虚构 invariant。C3.4 增加两个 Science preset YAML 文件，并且只修改由 repository generator 识别的 owning workspace、resolver、generated catalog、runnable example/snapshot、Science 文档与 website projection 文件。任何额外文件都必须能由 slice diff 中的上述某项责任解释。
+预期 file plan 是具体的，但 repository convention 要求时允许采用更小的等效拆分。C3.1 修改 `packages/core/agent-loop/src/agent.ts`、聚焦 loop/runtime-context test 与 agent-loop README pair。C3.2 在 `tool-fs` source 目录下增加未来的 `read-only.ts` entry 与一个共享 config resolver，调整 `src/index.ts`、`package.json`、build configuration、README pair，以及独立 source/built-entry test。C3.3 为 `packages/science/tool-science` 创建惯例要求的 `package.json`、`tsconfig.json`、`src/index.ts`、config/context/tool module、test、README pair 与 invariant companion；当 package 不拥有额外 authoritative mutable relationship 时，companion 不得虚构 invariant。C3.4 增加两个 Science preset YAML 文件，并且只修改由 repository generator 识别的 owning workspace、resolver、generated catalog、runnable example/snapshot、Science 文档与 website projection 文件。任何额外文件都必须能由 slice diff 中的上述某项责任解释。
 
 ## C3.1 Core runtime-context 前置条件
 

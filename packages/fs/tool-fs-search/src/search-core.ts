@@ -233,6 +233,7 @@ export async function runRipgrep(
         stderr: { maxBytes: stderrMaxBytes },
       },
       graceMs,
+      environmentBase: 'scrubbed-parent',
       signal: exec.signal,
     } satisfies SubprocessSpawnSpec)
   } catch (error: unknown) {
