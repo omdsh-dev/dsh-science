@@ -636,6 +636,56 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     await ctx1.fiber.dispose()
   })
 
+  it('restores compacted runtime context into the first cold-resume request', async () => {
+    const sessionId = SessionId('runtime-context-cold-resume')
+    const { ctx: ctx1, root } = await persistentHarness(new MockAdapter([textResponse('first')]))
+    ctx1.systemPrompt.context({ name: 'policy', order: 0, text: 'Mode: read-only.' })
+    const a1 = (await ctx1.agents.create({
+      sessionId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })).agent
+    a1.followup(createUserMessage({ content: [{ type: 'text', text: 'first request' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx1, a1)
+    const retained = a1.session.events.findLast(event =>
+      event.type === 'user/message'
+      && event.data.source.kind === 'plugin'
+      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    if (retained?.type !== 'user/message') throw new Error('first request did not retain runtime context')
+    a1.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'compacted before resume' }],
+      source: { kind: 'plugin', plugin: 'test-compaction' },
+    }), {
+      surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
+      sourceEventSeqs: [retained.seq],
+    })
+    await ctx1.sessions.flush(a1.session)
+    await ctx1.fiber.dispose()
+
+    const adapter2 = new MockAdapter([textResponse('resumed')])
+    const ctx2 = await mountPersistentHarness(root, adapter2)
+    ctx2.systemPrompt.context({ name: 'policy', order: 0, text: 'Mode: read-only.' })
+    const a2 = (await ctx2.agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })).agent
+    a2.followup(createUserMessage({ content: [{ type: 'text', text: 'resume request' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx2, a2)
+
+    const snapshots = adapter2.requests[0]?.messages.filter(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots?.[0]?.content).toEqual(retained.data.content)
+    expect(a2.session.events.filter(event =>
+      event.type === 'user/message'
+      && event.data.source.kind === 'plugin'
+      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')).toHaveLength(2)
+    expect(a2.session.events.find(event => event.sourceEventSeqs?.includes(retained.seq))).toMatchObject({
+      surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
+    })
+    await ctx2.fiber.dispose()
+  })
+
   it('resume reloads a persisted session: history + turn numbering continue, no duplicate seqs', async () => {
     // Lifecycle 1: run one full turn, persisting it.
     const adapter1 = new MockAdapter([textResponse('first answer')])

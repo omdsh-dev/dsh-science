@@ -132,6 +132,24 @@ describe('agent loop', () => {
     expect(adapter.requests).toHaveLength(1)
   })
 
+  it('rejects a second maintenance operation while the first owns the agent', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    const agent = ctx.agentLoop.create(SessionId('maintenance-exclusive'), { provider: 'mock', model: 'mock' })
+    const started = Promise.withResolvers<undefined>()
+    const finish = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => {
+      started.resolve(undefined)
+      await finish.promise
+    })
+    await started.promise
+
+    expect(() => agent.runMaintenance(async () => undefined))
+      .toThrow('agent "maintenance-exclusive" already has active work')
+    finish.resolve(undefined)
+    await maintenance
+    await agent.whenIdle()
+  })
+
   it('suppresses the replay when a latched maintenance wake is removed', async () => {
     const adapter = new MockAdapter([])
     const ctx = await harness(adapter)
@@ -380,6 +398,9 @@ describe('agent loop', () => {
       type: 'text',
       text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
     }])
+    expect(adapter.requests[0]?.messages.filter(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')).toHaveLength(1)
 
     send(agent, 'unchanged')
     await waitForIdle(ctx, agent)
@@ -445,6 +466,99 @@ describe('agent loop', () => {
       && message.source.plugin === '@deepseek-ai/dsh-system-prompt')).toBe(true)
   })
 
+  it('restores a retained runtime context after pre-step compaction before the first request', async () => {
+    const adapter = new MockAdapter([textResponse('one')])
+    const ctx = await harness(adapter)
+    ctx.systemPrompt.context({ name: 'policy', order: 0, text: 'Mode: read-only.' })
+    const agent = ctx.agentLoop.create(SessionId('a-runtime-context-pre-step-compaction'), { provider: 'mock', model: 'mock' })
+    const retained = agent.session.append('user/message', createUserMessage({
+      content: [{
+        type: 'text',
+        text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
+      }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    }), { surfaceOp: 'append' })
+    ctx.on('agent/pre-step', async ({ agent: subject }, next) => {
+      const decision = await next()
+      if (subject === agent) {
+        agent.session.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: 'pressure summary' }],
+          source: { kind: 'plugin', plugin: 'test-compaction' },
+        }), {
+          surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
+          sourceEventSeqs: [retained.seq],
+        })
+      }
+      return decision
+    })
+
+    send(agent, 'first request after pressure')
+    await waitForIdle(ctx, agent)
+
+    const snapshots = adapter.requests[0]?.messages.filter(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots?.[0]?.content).toEqual(retained.data.content)
+    const contextEvents = agent.session.events.filter(event =>
+      event.type === 'user/message'
+      && event.data.source.kind === 'plugin'
+      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(contextEvents).toHaveLength(2)
+    expect(agent.session.events.find(event => event.sourceEventSeqs?.includes(retained.seq))).toMatchObject({
+      surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
+    })
+  })
+
+  it('restores runtime context before an overflow retry after replacement compaction', async () => {
+    const adapter = new MockAdapter([
+      () => { throw new LlmError('context overflow', 'CONTEXT_OVERFLOW') },
+      textResponse('recovered'),
+    ])
+    const ctx = await harness(adapter)
+    ctx.systemPrompt.context({ name: 'policy', order: 0, text: 'Mode: read-only.' })
+    let assemblies = 0
+    ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+      assemblies += 1
+      return next()
+    })
+    const agent = ctx.agentLoop.create(SessionId('a-runtime-context-overflow-retry'), { provider: 'mock', model: 'mock' })
+    ctx.on('agent/request-error', ({ agent: subject }) => {
+      if (subject !== agent) return
+      const retained = agent.session.events.findLast(event =>
+        event.type === 'user/message'
+        && event.data.source.kind === 'plugin'
+        && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')
+      if (retained?.type !== 'user/message') throw new Error('request had no retained runtime context')
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'overflow summary' }],
+        source: { kind: 'plugin', plugin: 'test-compaction' },
+      }), {
+        surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
+        sourceEventSeqs: [retained.seq],
+      })
+      return { kind: 'retry' }
+    })
+
+    send(agent, 'recover after overflow')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(assemblies).toBe(1)
+    const snapshots = adapter.requests[1]?.messages.filter(message =>
+      message.source.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots?.[0]?.content).toEqual([{
+      type: 'text',
+      text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
+    }])
+    expect(agent.session.events.filter(event =>
+      event.type === 'user/message'
+      && event.data.source.kind === 'plugin'
+      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')).toHaveLength(2)
+  })
+
   it('clears compacted runtime context after the active set becomes empty', async () => {
     const adapter = new MockAdapter([textResponse('one'), textResponse('two')])
     const ctx = await harness(adapter)
@@ -481,7 +595,15 @@ describe('agent loop', () => {
   it('does not clear runtime context after an unrelated replacement', async () => {
     const adapter = new MockAdapter([textResponse('ok')])
     const ctx = await harness(adapter)
+    ctx.systemPrompt.context({ name: 'policy', order: 0, text: 'Mode: read-only.' })
     const agent = ctx.agentLoop.create(SessionId('a-runtime-context-unrelated-compaction'), { provider: 'mock', model: 'mock' })
+    const retained = agent.session.append('user/message', createUserMessage({
+      content: [{
+        type: 'text',
+        text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
+      }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    }), { surfaceOp: 'append' })
     const original = agent.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'old context' }],
       source: { kind: 'plugin', plugin: 'test-context' },
@@ -496,9 +618,15 @@ describe('agent loop', () => {
 
     send(agent, 'after compaction')
     await waitForIdle(ctx, agent)
-    expect(adapter.requests[0]?.messages.some(message =>
+    const snapshots = adapter.requests[0]?.messages.filter(message =>
       message.source.kind === 'plugin'
-      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')).toBe(false)
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots?.[0]?.content).toEqual(retained.data.content)
+    expect(agent.session.events.filter(event =>
+      event.type === 'user/message'
+      && event.data.source.kind === 'plugin'
+      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')).toHaveLength(1)
   })
 
   it('replaces a malformed retained runtime-context message with the current complete snapshot', async () => {

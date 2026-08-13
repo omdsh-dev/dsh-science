@@ -337,6 +337,9 @@ export class ReactLoopAgent implements Agent {
     const system = renderPrompt(assembly)
 
     while (true) {
+      const sections = renderContextSections(assembly)
+      const context = this.runtimeContext.project(joinContextSections(sections), sections)
+      if (context !== undefined) this.session.append('user/message', context, { surfaceOp: 'append' })
       const { request, preparedCall } = await this.buildRequest(
         turn, step, assembly.tools, system, this.session.deriveMessages(), signal,
       )
