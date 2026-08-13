@@ -680,7 +680,11 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
       event.type === 'user/message'
       && event.data.source.kind === 'plugin'
       && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')).toHaveLength(2)
-    expect(a2.session.events.find(event => event.sourceEventSeqs?.includes(retained.seq))).toMatchObject({
+    const replacement = a2.session.events.find(event =>
+      event.type === 'user/message'
+      && event.sourceEventSeqs?.includes(retained.seq))
+    expect(replacement).toMatchObject({
+      sourceEventSeqs: [retained.seq],
       surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
     })
     await ctx2.fiber.dispose()

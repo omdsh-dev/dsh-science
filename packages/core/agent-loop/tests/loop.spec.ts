@@ -505,7 +505,11 @@ describe('agent loop', () => {
       && event.data.source.kind === 'plugin'
       && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')
     expect(contextEvents).toHaveLength(2)
-    expect(agent.session.events.find(event => event.sourceEventSeqs?.includes(retained.seq))).toMatchObject({
+    const replacement = agent.session.events.find(event =>
+      event.type === 'user/message'
+      && event.sourceEventSeqs?.includes(retained.seq))
+    expect(replacement).toMatchObject({
+      sourceEventSeqs: [retained.seq],
       surfaceOp: { op: 'replace', start: retained.seq, end: retained.seq },
     })
   })
@@ -523,8 +527,8 @@ describe('agent loop', () => {
       return next()
     })
     const agent = ctx.agentLoop.create(SessionId('a-runtime-context-overflow-retry'), { provider: 'mock', model: 'mock' })
-    ctx.on('agent/request-error', ({ agent: subject }) => {
-      if (subject !== agent) return
+    ctx.on('agent/request-error', async ({ agent: subject }, next) => {
+      if (subject !== agent) return next()
       const retained = agent.session.events.findLast(event =>
         event.type === 'user/message'
         && event.data.source.kind === 'plugin'
