@@ -14,7 +14,7 @@ The first release must also avoid implying parity with Claude Science. Persisten
 
 ## Proposal
 
-Add Science Mode as four cooperating layers: a Science preset and model-facing tools, a provider-neutral runtime with a local Conda provider, a Science Session domain, and a client view in the existing Details column. The Session log is the only durable authority. Runtime handles and mutable scratch files remain process or filesystem state and never become a second Session database.
+Add Science Mode as four cooperating layers: a Science preset and model-facing tools, a Runtime that binds existing Conda prefixes, a Science Session domain, and a client view in the existing Details column. The Session log is the only durable authority. Runtime handles and mutable scratch files remain process or filesystem state and never become a second Session database.
 
 Development advances one phase at a time. Every phase receives a separate local commit, focused verification, fresh independent review, and a stop before the next phase. The Science work is seeded from the exact 2026-08-13 DSH snapshot `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` in a standalone local repository with no configured remote. It does not modify the existing DSH working tree, create a public repository, touch `dsh-external`, or upload changes.
 
@@ -35,8 +35,7 @@ Development advances one phase at a time. Every phase receives a separate local 
 | Package | Responsibility in the complete MVP |
 |---|---|
 | `@deepseek-ai/dsh-science-session` | The only durable Science record, event, and projection types; one strict event-stream fold; Session applicability policy; derived projection; and invariant companion |
-| `@deepseek-ai/dsh-science-runtime` | Provider-neutral operational request/result, lease/handle, cancellation, and failure types; it reuses and produces the Session package's durable vocabulary rather than redefining it |
-| `@deepseek-ai/dsh-science-runtime-local` | Conda prefix observation, exact-Session leases, Science scratch, direct-argv orchestration, and result classification over the shared subprocess and sandbox capabilities |
+| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime` plus the sole local Conda implementation: observation, exact-Session leases, scratch, direct-argv orchestration, and result classification. Exported types stay free of Host scratch paths. A second provider, or a production Consumer that would otherwise import local-only types, is the split trigger; see the [Phase 2 architecture note](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) |
 | `@deepseek-ai/dsh-tool-science` | Model-visible Science tools that call the domain and runtime services without spawning directly |
 | `@deepseek-ai/dsh-client-ui-science` | Read-only projection consumption and the four Science Details tabs |
 | Built-in Science preset | Per-session prompt and tool composition; Host-plane runtime and projection services remain outside the isolated preset |

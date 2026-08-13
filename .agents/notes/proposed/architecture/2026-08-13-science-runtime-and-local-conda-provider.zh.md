@@ -6,7 +6,7 @@ Status: proposed
 
 ## 问题
 
-[Science Mode MVP 记录](../feature/2026-08-12-science-mode-core-mvp.md)冻结了持久的 Science 会话事实，并把提供方无关的运行时与本地 Conda 提供方列为 Phase 2，但尚未把执行边界定义到足以安全实现的精度。粗糙的提供方实现可能重复已经归 `ctx.subprocess` 负责的进程组清理，在承诺干净环境的同时继承环境中的凭据，把项目目录而不是 Science 暂存目录设为授权范围，在 spawn 之后才追加运行记录，或者把宿主路径与远端执行环境错误组合。
+[Science Mode MVP 记录](../feature/2026-08-12-science-mode-core-mvp.md)冻结了持久的 Science 会话事实，并把绑定已有 Conda 前缀的 Runtime 工作列为 Phase 2，但尚未把执行边界定义到足以安全实现的精度。粗糙的提供方实现可能重复已经归 `ctx.subprocess` 负责的进程组清理，在承诺干净环境的同时继承环境中的凭据，把项目目录而不是 Science 暂存目录设为授权范围，在 spawn 之后才追加运行记录，或者把宿主路径与远端执行环境错误组合。
 
 这条边界还必须确保会话日志具有权威性。环境身份、运行开始和终态结算是持久事实；可变进程句柄与暂存文件不是。后续面向模型的工具需要一个操作，由它产生每项外部事实，并按正确顺序提交对应事件；不能把低层提供方交给工具，使工具成为第二个变更责任方。
 
@@ -16,15 +16,16 @@ Phase 2 仍属于产品功能之前的基础设施。本阶段不提供 Science 
 
 ### Phase 边界与包职责
 
-只新增两个包，暂不新增面向模型的消费方。
+Phase 2 只新增一个包，不新增生产消费方。
 
 | 包 | 负责 | 不负责 |
 |---|---|---|
-| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime` 服务定义、操作／结果／错误词汇，以及环境绑定和 Python/R 运行的唯一变更操作 | Conda 或文件系统机制、进程组、沙箱 runner、工具、提示词文本、展示或 UI |
-| `@deepseek-ai/dsh-science-runtime-local` | 允许列表内的本地 profile 配置、稳定的 Conda 观测、精确会话预约、Science 暂存目录、直接 argv 构造、超时／结果分类，以及对共享服务的编排 | shell 解析、OS 进程树信号、通用沙箱策略、附件／图表发布、环境创建或包安装 |
+| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime`、操作／结果／错误词汇，以及唯一的本地 Conda 实现：允许列表内的 profile 配置、稳定观测、精确会话预约、Science 暂存目录、直接 argv 构造、超时／结果分类，以及对共享服务的编排 | 第二个执行提供方、shell 解析、OS 进程树信号、通用沙箱策略、工具、提示词文本、展示、UI、附件／图表发布或环境创建 |
 | 既有能力责任方 | `ctx.subprocess` 负责受管进程树、输出收集、TERM-to-KILL 与完全停稳；`ctx.sandbox` 负责 argv 限制与 runner 诊断；`dsh-home-paths` 负责 Harness home 解析；`dsh-timeout` 负责关联的截止时间 | Science 状态转换或会话变更 |
 
-该分工遵守[能力 seam 的角色划分](../../implemented/architecture/2026-06-13-capability-seams.md)。Phase 3 工具成为 `ctx.scienceRuntime` 的消费方，绝不导入本地提供方，也不自行追加 `science/environment-bound`、`science/run-started` 或 `science/run-finished`。Phase 2 不把这些包注册到随产品交付的 profile；由仅用于测试的消费方验证组装后的服务。
+只有一个可设想的提供方、且没有生产消费方时，这些角色应留在同一个包中，直到出现第二个提供方，或生产消费方否则必须导入仅属于本地实现的类型（[能力 seam 的角色划分](../../implemented/architecture/2026-06-13-capability-seams.md)）。因此 Phase 2 不创建 `@deepseek-ai/dsh-science-runtime-local`，也不声称已经具备完整的三角色 seam。导出的服务类型不含宿主暂存路径、Conda 前缀类型或其他仅属于本地实现的模块，以便日后提取时不必改写调用方。
+
+Phase 3 新增 `@deepseek-ai/dsh-tool-science` 作为生产消费方。这些工具注入 `ctx.scienceRuntime`，绝不自行追加 `science/environment-bound`、`science/run-started` 或 `science/run-finished`。如果折叠后的包无法把仅属于本地实现的类型排除在该导出之外，Phase 3 在同一次变更中提取本地提供方。Loader 测试可以组装这个折叠后的包；它并不使 seam 完整，也不能证明角色需要独立演进。Phase 2 不把该包注册到随产品交付的 profile。
 
 Science 执行不同于 `ctx.codeRuntime`。它在全新进程中执行一个精确的 Python 或 R 源文件，不暴露宿主绑定桥接或 Code Mode SDK，也不实现 Code Mode 记录中延后的 CPython 后端。
 
@@ -36,8 +37,8 @@ Phase 2 先补齐四处范围有限的通用缺口，而不绕过既有 seam。
 
 1. `SubprocessSpawnSpec` 新增必填字段 `environmentBase: 'scrubbed-parent' | 'empty'`。每个现有消费方都显式填写其既有的 `'scrubbed-parent'` 选择；Science 使用 `'empty'`。本地与 E2B 提供方必须先向被请求的程序提供该精确基础环境，再应用 `spec.env`。提供方的控制进程可以保留其已记录的传输环境，但不得让该环境进入目标程序。
 2. `SubprocessRuntime` 暴露只读的 `executionWorld: 'host-local' | 'remote'` 能力事实。`dsh-subprocess-local` 报告 `'host-local'`，E2B 子进程提供方报告 `'remote'`。本地 Science 提供方必须先确认该值为 `'host-local'`，才能创建 owner record、目录或会话事件。`SandboxProvider` 不新增重复事实：其现有服务定义已经是共用宿主内核、按宿主路径实施限制的 seam，本地提供方依赖这项约定。子进程描述符可以防止这个使用宿主路径的消费方与远端进程环境错误组合；它不是适用于任意远端提供方组合的通用身份协议。
-3. runner spawn、runner fatal 和 denial 分类从 Bash 消费方下沉到 `dsh-sandbox` 导出的分类模块。Bash 与 Science 调用同一份实现。runner failure 的优先级高于 denial，因为它证明请求的解释器根本没有运行；两者都不得报告成普通的 Python/R exception。
-4. `SubprocessOutputRead` 新增 `utf8Validity: 'valid' | 'invalid' | 'unknown'`，用于描述该次读取所代表的精确字节切片。本地收集器先根据保留的字节判定 `valid` 或 `invalid`，之后才执行替换式解码；E2B 等只接收已经解码的远端文本的提供方报告 `unknown`。现有文本消费方保留当前行为。Science 版本探测与 UTF-8 探测要求从 offset zero 开始的无损读取，且 `utf8Validity === 'valid'`；绝不根据没有出现 U+FFFD 来推断有效性。
+3. runner spawn、runner fatal 和 denial 分类从 Bash 与 Pwsh 消费方下沉到 `dsh-sandbox` 导出的分类模块。Bash、Pwsh 与 Science 调用同一份实现。这两个 shell 消费方已经保持逐调用镜像；如果只迁移 Bash，就会再次产生这份副本本要防止的漂移。runner failure 的优先级高于 denial，因为它证明请求的解释器根本没有运行；两者都不得报告成普通的 Python/R exception。
+4. `SubprocessOutputRead` 新增 `utf8Validity: 'valid' | 'invalid' | 'unknown'`，用于描述该次读取所代表的精确字节切片。任何保留这些字节的提供方，都先根据该切片判定 `valid` 或 `invalid`，之后才执行替换式解码。这包括本地收集器，以及通过 base64 传输恢复原始命令字节后的 E2B。只有已经拿到解码文本且无法恢复字节切片的提供方才报告 `unknown`。现有文本消费方保留当前行为。Science 版本探测与 UTF-8 探测要求从 offset zero 开始的无损读取，且 `utf8Validity === 'valid'`；绝不根据没有出现 U+FFFD 来推断有效性。
 
 Science 提供方只消费公开的 `SubprocessHandle` 操作。它不安装第二套进程级退出监听器，不直接发送进程组信号，也不复制输出收集器。这些机制继续由 [subprocess seam](../../implemented/architecture/2026-07-26-subprocess-seam.md)及其同步退出后备机制负责。
 
@@ -52,7 +53,7 @@ Science 提供方只消费公开的 `SubprocessHandle` 操作。它不安装第�
 | `ScienceRunHandle` | 只暴露 `runId`、`done: Promise<ScienceRunResult>` 和幂等的 `cancel(): void`；绝不暴露 PID、`SubprocessHandle`、可执行文件路径或宿主暂存路径 |
 | `ScienceRunResult` | 以已提交的 `ScienceRunTerminal`、有界的 stdout/stderr 尾部、精确字节总数和截断标志完成；普通程序失败、超时与取消结果均作为值返回 |
 
-`bindEnvironment` 和 `startRun` 发布前的失败会以 `ScienceRuntimeError` 拒绝。误用与能力错误码为 `SESSION_NOT_LIVE`、`SERVICE_DISPOSING`、`RUNTIME_BUSY`、`ENVIRONMENT_NOT_READY`、`CONFINEMENT_UNAVAILABLE` 和 `INVALID_REQUEST`；调用方中止、发布前超过截止时间和提供方失败分别使用 `OPERATION_CANCELLED`、`OPERATION_TIMED_OUT` 和 `INFRASTRUCTURE_FAILURE`。这些失败不追加运行事件。`science/run-started` 提交后，spawn、runner、进程、超时和调用方取消等结果会把 `done` 结算为终态值，并追加 `science/run-finished`。持久的非成功错误码为 `SPAWN_FAILED`、`SANDBOX_RUNNER_FAILED`、`SANDBOX_DENIED`、`DESCENDANT_CLEANUP_REQUIRED`、`PROCESS_SIGNALLED`、`PROCESS_EXIT_NONZERO`、`TIMEOUT` 和 `CANCELLED`。如果无法证明整棵进程树完全停稳，或无法追加终态事实，`done` 会以 `QUIESCENCE_UNPROVEN` 或 `TERMINAL_COMMIT_FAILED` 拒绝；不得返回看似已经持久提交的值。
+`bindEnvironment` 和 `startRun` 发布前的失败会以 `ScienceRuntimeError` 拒绝。误用与能力错误码为 `SESSION_NOT_LIVE`、`SERVICE_DISPOSING`、`RUNTIME_BUSY`、`ENVIRONMENT_NOT_READY`、`CONFINEMENT_UNAVAILABLE` 和 `INVALID_REQUEST`；调用方中止、发布前超过截止时间和提供方失败分别使用 `OPERATION_CANCELLED`、`OPERATION_TIMED_OUT` 和 `INFRASTRUCTURE_FAILURE`。这些失败不追加运行事件。`science/run-started` 提交后，spawn、runner、进程、超时和调用方取消等结果会把 `done` 结算为终态值，并追加 `science/run-finished`。持久的非成功错误码为 `SPAWN_FAILED`、`SANDBOX_RUNNER_FAILED`、`SANDBOX_DENIED`、`DESCENDANT_CLEANUP_REQUIRED`、`PROCESS_SIGNALLED`、`PROCESS_EXIT_NONZERO`、`TIMEOUT` 和 `CANCELLED`。如果无法证明整棵进程树完全停稳，`done` 会以 `QUIESCENCE_UNPROVEN` 拒绝。如果精确会话仍然存活，但无法追加终态事实，则拒绝为 `TERMINAL_COMMIT_FAILED`。如果精确会话已经脱离或被替换，则在完全停稳后以 `SESSION_NOT_LIVE` 拒绝；这是发布后唯一使用 `SESSION_NOT_LIVE` 的情况，且不是 `TERMINAL_COMMIT_FAILED`。运行时绝不向已脱离的对象或同 ID 后继会话追加事件，也不得返回看似已经持久提交的值。
 
 `startRun` 在发布前分配延后生效的 `ScienceRunHandle`，但直到 `science/run-started` 提交后才对外暴露。随后，运行时启动由其负责的结算任务，并以同一句柄完成该操作。同步 spawn 抛错或已经拒绝的进程 promise 可能在调用方看到句柄前就结算 `done`，但由于持久的开始事实已经存在，`startRun` 仍须返回该句柄。结算任务会一直持有精确会话预约，直到终态提交完成或显式的基础设施拒绝发生。如果无法证明完全停稳，还要保留会话 ID 隔离，直到后续清理证明进程树已经死亡。本地提供方声明对 `sessions`、`subprocess` 和 `sandbox` 的必需 Cordis 注入，使这些服务在终态结算和提供方资源释放期间始终可用。
 
@@ -93,7 +94,7 @@ Science 提供方只消费公开的 `SubprocessHandle` 操作。它不安装第�
 
 服务资源释放会先拒绝新工作，再取消每项由提供方负责的探测和运行，等待每棵受管进程树退出并完成终态追加，之后才返回。依赖顺序保证该消费方完全停稳前，子进程与沙箱提供方仍然存活。相互独立的清理结果使用 `Promise.allSettled`；一个目标失败不得让另一个目标得不到清理机会。
 
-`session/disposed` 只用于观测，而且存储在脱离会话前不能等待该事件。因此，意外脱离会触发清理，但禁止随后向已脱离的对象或同 ID 后继会话追加任何事件。句柄在完全停稳后以 `SESSION_NOT_LIVE` 拒绝；如果持久日志包含没有匹配结束事实的开始事实，冷回放会派生 `interrupted`，其依据是 `session/end-seed`。Phase 3 的正常拆卸必须先取消并等待运行时操作，再脱离会话。本记录不声称任意脱离都能记录 `cancelled`。
+`session/disposed` 只用于观测，而且存储在脱离会话前不能等待该事件。因此，意外脱离会触发清理，但禁止随后向已脱离的对象或同 ID 后继会话追加任何事件。受管进程树完全停稳后，`done` 按运行时约定以 `SESSION_NOT_LIVE` 拒绝；如果持久日志包含没有匹配结束事实的开始事实，冷回放会派生 `interrupted`，其依据是 `session/end-seed`。Phase 3 的正常拆卸必须先取消并等待运行时操作，再脱离会话。本记录不声称任意脱离都能记录 `cancelled`。
 
 ### Conda 观测与不可变前缀的使用
 
@@ -121,9 +122,9 @@ Science 运行进程设置 `environmentBase: 'empty'`，并且只提供 `HOME`�
 
 ### 文件与测试结构
 
-保持编排精简。`science-runtime` 使用 `src/types.ts`、`src/index.ts` 和 `src/invariant.ts`。本地提供方把 `config.ts`、`environment.ts`、`scratch.ts`、`execution.ts`、`lifecycle.ts` 与精简的 `index.ts` 分开。每个包都导出 `./invariant`；如果不存在可独立观测的事件／数据关系，其安装器应给出该包专用的空结果原因，而不是为了诊断而暴露私有生命周期状态。Phase 2 的每个新生产文件不得超过 400 个物理行，每个提供方 `index.ts` 不得超过 250 行，每份按职责聚焦的 spec 不得超过 600 行。如需突破上限，必须在同一提交中提取职责，而不能增加文件大小例外。
+保持编排精简。折叠后的包保留 `src/types.ts`、精简的 `src/index.ts`、`src/invariant.ts`，以及分开的 `config.ts`、`environment.ts`、`scratch.ts`、`execution.ts` 和 `lifecycle.ts`。它导出 `./invariant`；如果不存在可独立观测的事件／数据关系，安装器应给出该包专用的空结果原因，而不是为了诊断而暴露私有生命周期状态。Phase 2 的每个新生产文件不得超过 400 个物理行，`index.ts` 不得超过 250 行，每份按职责聚焦的 spec 不得超过 600 行。如需突破上限，必须在同一提交中提取职责，而不能增加文件大小例外。
 
-使用虚拟前缀的 CI 覆盖以下场景：严格的 profile 配置；仅 Python、仅 R、共享前缀及不同前缀；路径缺失或逃逸；稳定与变化的指纹；精确序列化和版本归一化；owner marker 恢复／fork／冲突；精确模式；包含空格和元字符的直接 argv 路径；非 ASCII 源码／输出；严格、无效与未知的 UTF-8 输出事实；空基础环境捕获；完整实施限制的专用探测暂存目录及其清理；拒绝 Science 根目录与临时根目录重叠、拒绝前缀与可写根目录重叠；runner／denial 分类；先开始后 spawn、进程树退出后才结束的顺序；输出字节边界；超时／取消／TERM-trap 升级；精确会话并发；清理前的同 ID 生命周期隔离与完全停稳后的安全复用；资源释放达到完全停稳；前缀变更前后 manifest；以及严格冷回放。Python 以包含空格的非临时 Science 根目录作为正例；R 覆盖普通的无空格暂存目录，以及包含空格的 `TMPDIR` 快速失败 fixture。用于实际受限探测或运行的虚拟前缀与隔离的 `DSH_HOME` 都位于测试负责的非临时根目录下，既不与沙箱临时根目录重叠，也不相互重叠；`/tmp` 中的虚拟前缀或 `DSH_HOME` 只用于重叠的反例 fixture。至少一个 Loader 组合使用真实的 `SessionStore`、Science invariant、本地子进程、本地沙箱、本地运行时和虚拟解释器；只使用 mock 无法封闭能力 seam。
+使用虚拟前缀的 CI 覆盖以下场景：严格的 profile 配置；仅 Python、仅 R、共享前缀及不同前缀；路径缺失或逃逸；稳定与变化的指纹；精确序列化和版本归一化；owner marker 恢复／fork／冲突；精确模式；包含空格和元字符的直接 argv 路径；非 ASCII 源码／输出；由保留字节得到的 UTF-8 `valid`／`invalid` 事实，以及仅在不存在字节切片时出现的 `unknown`；空基础环境捕获；完整实施限制的专用探测暂存目录及其清理；拒绝 Science 根目录与临时根目录重叠、拒绝前缀与可写根目录重叠；runner／denial 分类；先开始后 spawn、进程树退出后才结束的顺序；输出字节边界；超时／取消／TERM-trap 升级；精确会话并发；清理前的同 ID 生命周期隔离与完全停稳后的安全复用；资源释放达到完全停稳；前缀变更前后 manifest；以及严格冷回放。E2B 在恢复原始字节后的读取报告 `valid` 或 `invalid`；不得仅因进程环境位于远端就报告 `unknown`。Python 以包含空格的非临时 Science 根目录作为正例；R 覆盖普通的无空格暂存目录，以及包含空格的 `TMPDIR` 快速失败 fixture。用于实际受限探测或运行的虚拟前缀与隔离的 `DSH_HOME` 都位于测试负责的非临时根目录下，既不与沙箱临时根目录重叠，也不相互重叠；`/tmp` 中的虚拟前缀或 `DSH_HOME` 只用于重叠的反例 fixture。至少一个 Loader 组合使用真实的 `SessionStore`、Science invariant、本地子进程、本地沙箱、折叠后的 Runtime 包和虚拟解释器；只使用 mock 无法证明运行时操作。这些测试并不使 Science seam 完整。
 
 真实机器验收需要显式启用，并接收显式的 Python 与 R 前缀，以及隔离、由测试负责且非临时的 `DSH_HOME`。它会分别运行每种语言，验证规范可执行文件／版本／history 身份、非 ASCII 源码／输出、环境清理、cwd 与专用目录、成功与取消／超时、完整限制、前缀写入拒绝，以及不存在提供方可观测的受管进程树进程或 fixture 已知后代进程。它不声称能够发现刻意逃离受管进程组的守护进程。前后递归前缀 manifest 使用 `lstat` 且不跟随符号链接，并记录相对路径、类型、符号链接目标、模式、大小、mtime 纳秒、ctime 纳秒和常规文件 SHA-256；它有意排除 atime，因为观测本身可能更新该值。只有空 diff 才能支持“前缀未改变”的结论。Python 与 R 分别报告 `PASS`、`FAIL` 或 `NOT-RUN`。虚拟前缀 CI 不能证明真实 Conda，源码验收也不能证明已安装应用或发布版本。
 
@@ -147,12 +148,24 @@ Science 运行进程设置 `environmentBase: 'empty'`，并且只提供 `HOME`�
 
 **在成功或资源释放时删除暂存目录。** 不予采纳，因为显式的 `state/` 与运行文件是 MVP 跨调用状态和诊断证据。清理过程负责进程和未发布的准备内容，不负责删除已接受的用户数据。
 
+**把发布后每一次失败的终态追加都记为 `TERMINAL_COMMIT_FAILED`，包括意外脱离。** 不予采纳，因为仍然存活的会话在追加被拒绝时仍可写入，需要基础设施失败；已脱离的会话不得再写入，并通过回放派生的 `interrupted` 恢复。
+
+**把发布后每一次失败的终态追加都记为 `SESSION_NOT_LIVE`。** 不予采纳，因为仍然存活的精确会话上的 fold、I/O 或不变式拒绝并不是存活性失败。
+
+**因为 SDK 回调是文本，就把 E2B 输出报告为 `utf8Validity: 'unknown'`。** 不予采纳，因为 E2B 提供方已经通过 base64 传输恢复原始命令字节，因此拥有与本地收集器相同的字节切片。
+
+**让 Pwsh 继续使用其复制的分类器，只让 Bash 与 Science 共享沙箱模块。** 不予采纳，因为 Bash 与 Pwsh 已经保持逐调用镜像。只迁移 Bash 会再次产生这份副本本要防止的漂移。
+
+**在 Phase 2 把提供方无关的 `dsh-science-runtime` 与 `dsh-science-runtime-local` 拆开，并让测试消费方补全 seam。** 不予采纳，因为[能力 seam 规则](../../implemented/architecture/2026-06-13-capability-seams.md)禁止预先拆分：只有一个可设想的提供方、且没有生产消费方时，应留在同一个包中。测试消费方不是生产责任方，不能证明 Definition／提供方需要独立演进。
+
+**把 Phase 3 工具提前到 Phase 2，以便两包拆分拥有生产消费方。** 不予采纳，因为工具面向模型，需要 Science preset，并依赖 Core 的同一次请求压缩修复。那部分工作仍属于 Phase 3。折叠后的包让操作 API 不含仅属于本地实现的类型，因此这些工具稍后可以注入 `ctx.scienceRuntime`。
+
 ## 验收标准
 
-- 两个包及其双语 README 实现服务定义／提供方分工，不新增工具、preset、UI、随产品交付的 profile 项，也不让消费方直接依赖本地提供方。
-- 通用子进程的空环境、执行环境和 UTF-8 有效性事实，加上共享沙箱分类，均完成定义／提供方／消费方迁移与聚焦测试；现有消费方显式保留此前行为。
+- 一个包 `@deepseek-ai/dsh-science-runtime` 及其双语 README 实现折叠后的服务定义加本地提供方。不存在 `dsh-science-runtime-local`，也不存在生产消费方、工具、preset、UI 或随产品交付的 profile 项。导出的服务类型不含宿主暂存路径或其他仅属于本地实现的模块。
+- 通用子进程的空环境、执行环境和 UTF-8 有效性事实，加上共享沙箱分类，均完成定义／提供方／消费方迁移与聚焦测试；Bash、Pwsh 和其他现有消费方显式保留此前行为。E2B 在恢复原始字节后的读取报告 `valid` 或 `invalid`。
 - 运行时操作是 Phase 2 三类 Science 变更的唯一责任方，强制使用精确且仍存活的会话身份，在产生任何副作用之前拒绝同一会话的并发工作，并保留不同会话之间的并发。
-- 每个已发布的运行都在请求的源码 spawn 前开始，并且只在整棵进程树完全停稳后结束；开始后的全部结果要么提交一个匹配的终态事件，要么以显式的基础设施失败拒绝。
+- 每个已发布的运行都在请求的源码 spawn 前开始，并且只在整棵进程树完全停稳后结束。开始后的结果要么提交一个匹配的终态事件，要么在精确会话仍然存活时以 `QUIESCENCE_UNPROVEN` 或 `TERMINAL_COMMIT_FAILED` 拒绝 `done`，要么在意外脱离后以 `SESSION_NOT_LIVE` 拒绝。
 - 环境观测与指纹遵守冻结的算法，漂移通过持久修订阻止 spawn，并且没有任何操作调用 Conda 或改变已配置的前缀。
 - 子进程接收文档精确定义的空基础环境允许列表，使用直接 argv 和专用 cwd，并且只在固定且完整的限制下运行；其可写根目录为专用暂存目录加通用沙箱临时根目录，并且全部与每个环境前缀不重叠。运行事件不暴露宿主暂存路径，任何 Science 事件都不暴露 stdout 或 stderr 文本；环境事件保留 Phase 1 schema 所需的绝对前缀和可执行文件事实。
 - 取消、超时、服务资源释放、spawn／runner 失败、会话意外脱离和同 ID 后继会话隔离均有聚焦的生命周期测试，而且每项清理结果相互独立。
@@ -168,6 +181,6 @@ Science 运行进程设置 `environmentBase: 'empty'`，并且只提供 `HOME`�
 
 环境指纹属于观测结果，不是可复现环境锁。`conda-meta/history` 与可执行文件 stat tuple 之外的文件可以改变，而指纹保持不变。因此，真实验收只针对“提供方未修改此前缀”这一结论检查更严格的前后 manifest，不会把该 manifest 提升为持久会话 payload。
 
-通用空环境与执行环境扩展会影响现有提供方和消费方。预发布策略允许这项必填字段迁移，但类型检查和组装测试必须证明该迁移没有悄然改变 Bash、LSP、terminal、subagent、文件系统搜索或 E2B 行为。
+通用空环境、执行环境、UTF-8 有效性与共享分类扩展会影响现有提供方和消费方。预发布策略允许这项必填字段迁移，但类型检查和组装测试必须证明该迁移没有悄然改变 Bash、Pwsh、LSP、terminal、subagent、文件系统搜索或 E2B 行为。
 
 会话意外释放时，系统无法同步等待运行时清理，也无法保证追加终态事件。如实的后备行为是执行清理，并在回放中派生 `interrupted`，而不是写入已经脱离的日志。Phase 3 必须维持先正常取消、再脱离会话的顺序。

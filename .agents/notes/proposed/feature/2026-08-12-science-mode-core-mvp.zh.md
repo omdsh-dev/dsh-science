@@ -14,7 +14,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 
 ## 提案
 
-把 Science Mode 增加为四个协作层：Science preset 与模型可见工具、提供方无关运行时与本地 Conda 提供方、Science Session 领域，以及现有 Details 栏中的客户端视图。会话日志是唯一持久权威。运行时 handle 与可变 scratch 文件继续属于进程或文件系统状态，绝不成为第二套会话数据库。
+把 Science Mode 增加为四个协作层：Science preset 与模型可见工具、绑定已有 Conda 前缀的 Runtime、Science Session 领域，以及现有 Details 栏中的客户端视图。会话日志是唯一持久权威。运行时 handle 与可变 scratch 文件继续属于进程或文件系统状态，绝不成为第二套会话数据库。
 
 开发一次只推进一个阶段。每个阶段都有独立本地提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切的 2026-08-13 DSH 快照 `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` 播种到一个未配置 remote 的独立本地仓库。它不修改现有 DSH worktree、不创建公开仓库、不触碰 `dsh-external`，也不上传变更。
 
@@ -35,8 +35,7 @@ CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner�
 | 包 | 完整 MVP 中的责任 |
 |---|---|
 | `@deepseek-ai/dsh-science-session` | 唯一的 durable Science record、event 与 projection 类型；唯一严格事件流 fold；Session applicability policy；派生 projection 与 invariant companion |
-| `@deepseek-ai/dsh-science-runtime` | 提供方无关的 operational request/result、lease/handle、取消与失败类型；它复用并产出 Session package 的 durable vocabulary，不重新定义一套同义模型 |
-| `@deepseek-ai/dsh-science-runtime-local` | 基于共享 subprocess 与 sandbox capability 的 Conda prefix 观测、精确 Session lease、Science scratch、direct-argv 编排与结果分类 |
+| `@deepseek-ai/dsh-science-runtime` | `ctx.scienceRuntime` 加上唯一的本地 Conda 实现：观测、精确 Session lease、scratch、direct-argv 编排与结果分类。导出类型不含宿主 scratch 路径。第二个提供方，或否则必须导入仅属于本地实现之类型的生产消费方，才是拆分触发条件；见 [Phase 2 架构记录](../architecture/2026-08-13-science-runtime-and-local-conda-provider.md) |
 | `@deepseek-ai/dsh-tool-science` | 调用领域与运行时服务而不直接 spawn 的模型可见 Science 工具 |
 | `@deepseek-ai/dsh-client-ui-science` | 只读 projection 消费与四个 Science Details 页签 |
 | 内置 Science preset | 逐会话提示词与工具组合；Host plane 的运行时与 projection 服务位于隔离 preset 之外 |
