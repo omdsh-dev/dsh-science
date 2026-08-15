@@ -8,7 +8,7 @@ English | [中文](2026-08-12-science-mode-core-mvp.zh.md)
 
 DSH can already persist Session events, project durable state, select per-session presets, confine processes, and store immutable image attachments. It does not own a Science-specific domain that answers which environment and prompt produced a run, which run produced a chart version, or which evidence supports a published research Outcome. Building only a Python or R tool would leave those facts in tool prose and make refresh, resume, fork, and audit disagree.
 
-CSSwitch and repositories under the private `dsh-external` organization are not the owner of these semantics. They may provide implementation evidence for process ownership, but DSH Science Mode is a native DSH feature. Its durable facts must follow the Session log and the [Session projection design](../architecture/2026-07-27-session-projection-and-command-log.md).
+DSH already owns provider and model selection. Science Mode is a native DSH composition over that shared capability; it does not add a provider, custom API adapter, gateway, or CSSwitch dependency. Its durable facts follow the Session log and the [Session projection design](../architecture/2026-07-27-session-projection-and-command-log.md).
 
 The first release must also avoid implying parity with Claude Science. Persistent kernels, environment management, generic artifacts, scientific review, remote compute, and release acceptance each need contracts that this MVP does not provide.
 
@@ -33,7 +33,17 @@ flowchart LR
   Projection --> UI["Science Details view"]
 ```
 
-Development advances one phase at a time. Every phase receives a separate commit, focused verification, fresh independent review, and a stop before the next phase. The Science work is seeded from the exact 2026-08-13 DSH snapshot `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` and published through the community repository `omdsh-dev/dsh-science`. Existing DSH working trees and `dsh-external` remain separate.
+Development advances one phase at a time. Every phase receives a separate commit, focused verification, fresh independent review, and a stop before the next phase. Dated upstream and downstream identities belong in the [desktop distribution and migration decision](../architecture/2026-08-15-dsh-science-desktop-distribution-reconnaissance.md), not in this product definition.
+
+## v0.1 product boundary
+
+v0.1 is the smallest publishable Science loop, delivered through both Web and Desktop carriers. It includes the existing DSH provider/model experience unchanged; a Science preset; exact-path Python and R execution against an explicitly selected existing environment; immutable versioned PNG charts; a provenance sidebar in the existing Details column; and cold reconstruction from the durable Session projection.
+
+The provenance sidebar lists every chart version and resolves its immutable attachment, source run, environment revision and fingerprint, request context, model/tool action, creation time, and owning Session attribution. User attribution comes only from existing Session actor or identity facts and renders as unavailable when those facts are absent. The chart event stores references rather than copying prompt text, credentials, binary data, or Host paths.
+
+One Science settings card configures an optional Conda prefix, explicit Python executable, explicit `Rscript` executable, and public defaults for Conda channels, a Python package index, and a CRAN mirror. Runtime validates and executes only the selected interpreter paths. Source settings do not authorize downloads or prefix mutation: v0.1 does not bundle Conda, install packages, create or update environments, repair environments, or delete them. A later environment or package manager must consume those settings through its own capability and approval policy.
+
+v0.1 does not include persistent kernels, notebooks, generic artifact types, scientific certification, remote compute, managed environment supply, a plugin marketplace, or a separate Desktop implementation of Science behavior. [The distribution decision](../architecture/2026-08-15-dsh-science-desktop-distribution-reconnaissance.md) owns the Web/Desktop × Standard/Science composition and release boundaries.
 
 ## Product decisions
 
@@ -41,11 +51,12 @@ Development advances one phase at a time. Every phase receives a separate commit
 |---|---|---|
 | Outcome | A model-published current research result plus backward evidence references; it is not a Goal or independent review | Publishing never starts or continues execution |
 | Charts | Immutable PNG versions only | SVG, HTML, PDF, tables, notebooks, visual diff, restore, and deletion are deferred |
-| Environments | Bind allowlisted existing Conda prefixes only | The MVP never creates, clones, upgrades, installs into, or deletes an environment |
+| Environments | Bind allowlisted existing Conda prefixes and exact Python/R paths configured in the Science settings card | The MVP never creates, clones, upgrades, installs into, repairs, or deletes an environment |
 | Python and R | Each language may use a different prefix or the same prefix | Availability and drift are reported independently |
 | Execution | One fresh process per call | Variables do not persist; explicit files under `state/` carry cross-call state |
-| UI | Outcome, Charts, Environment, and Conversation appear in the existing right Details column | The left navigation and generic tool details retain their owners |
-| Development source | Community repository seeded from the exact DSH commit | Existing DSH working trees and `dsh-external` remain separate |
+| Package sources | Store public Conda channel, Python index, and CRAN mirror defaults without granting install authority | A later package or environment manager owns downloads, credentials, mutation, and rollback |
+| Provider/model | Reuse the existing DSH provider and model capabilities unchanged | Science adds no provider, custom API, gateway, or CSSwitch integration |
+| UI | Outcome, Charts, Environment, and Conversation appear as a provenance sidebar in the existing right Details column | The left navigation and generic tool details retain their owners |
 
 ## Package ownership
 
@@ -78,6 +89,8 @@ Only `session/end-seed` derives `interrupted`: at each marker the projection rep
 ### Chart versions
 
 A chart record contains a stable chart ID, normalized logical name, positive consecutive version, immutable `ImageAttachmentRef`, title and optional caption, successful source run, pending `save_chart` call, request-header seq, environment revision and fingerprint, and creation time. The event envelope supplies the record's sequence. Phase 1 accepts only `image/png` and only a successful run already present in the same folded log. Version creation times never move backwards. A future diagnostic override for failed runs needs a new decision; the MVP does not infer one.
+
+The client resolves provenance through the owning Session: `requestHeaderSeq` supplies logged request context and safe provider/model identity; the tool call supplies the publishing model action; the source run and environment revision supply execution identity; existing Session actor or identity facts supply user attribution when available. Missing attribution stays explicit and never becomes a fabricated event field.
 
 ### Outcome
 
@@ -141,8 +154,8 @@ The hard guarantees are narrower: no automatic package installation or environme
 | 2 | [Runtime Service Definition and local Conda provider](../../implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | Fake-prefix CI coverage plus separately reported real-machine acceptance; owned trees settle; environment prefixes remain unchanged |
 | 3 | [Core compaction prerequisite, Science preset, prompt, state query, and Python/R tools](2026-08-13-science-preset-environment-context-and-run-tools.md) | Science prompt and tools are preset-scoped and every used environment context is durable and model-visible |
 | 4 | PNG save and Outcome publication consumers | Immutable versions and backward evidence validation replay identically |
-| 5 | Generic Details extension and Science client UI | Four accessible tabs render only projection truth; Standard sessions have no entry |
-| 6 | Composition, built-package checks, local MVP source closure | All named source checks pass and fresh review has no HIGH or BLOCK finding; publishing remains separately authorized |
+| 5 | Science settings card, generic Details extension, and Science client UI | Exact interpreter paths and public source defaults validate; four accessible tabs render only projection truth; Standard sessions have no Science entry |
+| 6 | Shared Web/Desktop composition, built-package checks, and local MVP source closure | Standard and Science run through both carriers without duplicated product logic; all named source checks pass and fresh review has no HIGH or BLOCK finding; installer, signing, and publishing remain separate evidence |
 
 Phase 1 changes the Science domain package and only the generic projection/persistence seams needed to serve that domain safely: canonical private-checkpoint admission and state-to-row watermarks, detached JSON values, explicit definition ownership, private/public change separation, exact-lifecycle durable drains, per-session cache serialization, and source-qualified log-revision identity. Repository metadata and architecture documentation change with those contracts. It does not pre-create Runtime, Tool, preset, attachment consumer, or Client packages, and it performs no UI, Conda, Python, R, or process-runtime work.
 
@@ -152,7 +165,7 @@ Phase 1 changes the Science domain package and only the generic projection/persi
 
 **Store Science truth in tool results or a UI database.** Rejected because cold resume and fork would need a second reconciliation protocol, and the UI could disagree with the authoritative Session log. Tool call arguments and results retain code and output; Science events retain compact provenance and state.
 
-**Use CSSwitch or `dsh-external` as the Science implementation owner.** Rejected because those repositories do not own DSH Outcome, chart-version, environment, conversation, or Session projection semantics. The Science source line is maintained in `omdsh-dev/dsh-science`.
+**Add provider or custom-API work to Science.** Rejected because DSH already owns provider and model selection. Science consumes that shared capability and does not copy CSSwitch proxy behavior or create a second provider stack.
 
 **Start with persistent Python and R kernels.** Rejected because kernel ownership, crash recovery, hidden mutable variables, package drift, and process disposal would dominate the MVP before the durable product loop is tested. Fresh processes plus explicit `state/` make cross-call state visible.
 
@@ -162,7 +175,7 @@ Phase 1 changes the Science domain package and only the generic projection/persi
 
 ## Acceptance criteria
 
-The complete MVP is accepted only when a Science preset can be created, resumed, and forked; environment identity and drift are explicit; Python and R execution is bounded and owned; chart and Outcome provenance is durable; the four Details tabs rebuild from cold projection; Standard behavior is unchanged; the threat model is visible; named source, composition, built-package, GUI, and replay checks pass; and a fresh independent review has no HIGH or BLOCK finding.
+The complete MVP is accepted only when a Science preset can be created, resumed, and forked; the settings card validates exact Python/R paths and public source defaults without mutating an environment; environment identity and drift are explicit; Python and R execution is bounded and owned; chart and Outcome provenance, request context, and available user attribution are durable or resolvable from the same Session; the four Details tabs rebuild from cold projection; Standard behavior is unchanged; both Web and Desktop use the shared composition; the threat model is visible; named source, composition, built-package, GUI, and replay checks pass; and a fresh independent review has no HIGH or BLOCK finding.
 
 CI fake-prefix evidence and real-machine Python/R acceptance remain separate. A missing real-machine run is reported as `NOT-RUN`, never inferred from unit tests. Source closure does not prove an installed application, signing, notarization, release readiness, or availability in arbitrary user environments.
 

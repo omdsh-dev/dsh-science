@@ -8,7 +8,7 @@ Status: proposed
 
 DSH 已经能够持久化会话事件、投影持久状态、选择逐会话 preset、约束进程，以及存储不可变图片附件。但它还没有 Science 专用领域，因而无法回答哪个环境和提示词产生了某次运行、哪个运行产生了某个图表版本，或哪些证据支撑已发布的研究 Outcome。若只构建 Python 或 R 工具，这些事实会留在工具自然语言中，刷新、恢复、fork 和审计将得到不一致结果。
 
-CSSwitch 与私有 `dsh-external` 组织下的仓库不是这些语义的 owner。它们可以为进程所有权提供实现证据，但 DSH Science Mode 是 DSH 原生功能。其持久事实必须沿用会话日志与[会话投影设计](../architecture/2026-07-27-session-projection-and-command-log.md)。
+DSH 已经拥有 provider（提供方）与模型选择能力。Science Mode 是复用该共享能力的 DSH 原生组合；它不新增 provider、自定义 API 适配器、gateway 或 CSSwitch 依赖。其持久事实沿用会话日志与[会话投影设计](../architecture/2026-07-27-session-projection-and-command-log.md)。
 
 首个版本还必须避免暗示已经达到 Claude Science 对等能力。持久 kernel、环境管理、通用产物、科学审查、远程计算与发布验收都需要本 MVP 尚未提供的约定。
 
@@ -33,7 +33,17 @@ flowchart LR
   Projection --> UI["Science Details view"]
 ```
 
-开发一次只推进一个阶段。每个阶段都有独立提交、聚焦验证、全新独立审查，并在下一阶段前停止。Science 工作从确切的 2026-08-13 DSH 快照 `7b9644f2b664e46c9518506035aa6c8d5af4d8e8` 播种，并通过社区仓库 `omdsh-dev/dsh-science` 发布。现有 DSH worktree 与 `dsh-external` 保持独立。
+开发一次只推进一个阶段。每个阶段都有独立提交、聚焦验证、全新独立审查，并在下一阶段前停止。带日期的上游与下游身份归[桌面发行与迁移决策](../architecture/2026-08-15-dsh-science-desktop-distribution-reconnaissance.md)所有，不写进本产品定义。
+
+## v0.1 产品边界
+
+v0.1 是最小可发布的 Science 闭环，同时通过 Web 与 Desktop 两种载体交付。它包含保持不变的 DSH provider／模型体验、Science preset、针对显式选择的已有环境进行的精确路径 Python 与 R 执行、不可变且有版本的 PNG 图表、现有 Details 栏中的溯源侧边栏，以及从持久 Session projection（会话投影）进行冷重建。
+
+溯源侧边栏列出每个图表版本，并解析其不可变附件、来源 run、环境 revision 与 fingerprint、请求语境、模型／工具动作、创建时间和所属 Session 的归属信息。用户归属只来自已有 Session actor 或 identity fact；缺少这些事实时显示为不可用。图表事件只保存引用，不复制提示词正文、凭据、二进制数据或 Host 路径。
+
+一个 Science 设置卡片配置可选 Conda prefix、显式 Python executable、显式 `Rscript` executable，以及 Conda channel、Python package index 和 CRAN mirror 的公共默认值。Runtime 只验证和执行选定的解释器路径。来源设置不授权下载或修改 prefix：v0.1 不打包 Conda，不安装 package，不创建、更新、修复或删除环境。后续 environment 或 package manager 必须通过自己的 capability 与 approval policy 消费这些设置。
+
+v0.1 不包含持久 kernel、notebook、通用产物类型、科学认证、远程计算、托管环境供应、插件市场，也不为 Desktop 复制一套 Science 业务实现。[发行决策](../architecture/2026-08-15-dsh-science-desktop-distribution-reconnaissance.md)负责 Web/Desktop × Standard/Science 组合与发布边界。
 
 ## 产品决策
 
@@ -41,11 +51,12 @@ flowchart LR
 |---|---|---|
 | Outcome | 模型发布的当前研究结果加向后证据引用；它不是 Goal，也不是独立审查 | 发布绝不启动或继续执行 |
 | 图表 | 仅支持不可变 PNG 版本 | SVG、HTML、PDF、表格、notebook、视觉 diff、restore 与删除均延后 |
-| 环境 | 只绑定 allowlist 中已有的 Conda prefix | MVP 绝不创建、克隆、升级、安装到或删除环境 |
+| 环境 | 绑定 allowlist 中已有的 Conda prefix，以及 Science 设置卡片配置的精确 Python/R 路径 | MVP 绝不创建、克隆、升级、安装到、修复或删除环境 |
 | Python 与 R | 两种语言可以使用不同 prefix，也可以使用同一个 | 可用性与 drift 分开报告 |
 | 执行 | 每次调用使用一个全新进程 | 变量不持久；跨调用状态由 `state/` 下的显式文件承载 |
-| UI | Outcome、Charts、Environment 与 Conversation 位于现有右侧 Details 栏 | 左侧导航与通用工具详情保留各自 owner |
-| 开发来源 | 从确切 DSH commit 播种的社区仓库 | 现有 DSH worktree 与 `dsh-external` 保持独立 |
+| Package 来源 | 保存公共 Conda channel、Python index 与 CRAN mirror 默认值，但不授予安装权限 | 后续 package 或 environment manager 负责下载、凭据、修改与回滚 |
+| Provider／模型 | 原样复用已有 DSH provider 与模型能力 | Science 不新增 provider、自定义 API、gateway 或 CSSwitch 集成 |
+| UI | Outcome、Charts、Environment 与 Conversation 以溯源侧边栏形式位于现有右侧 Details 栏 | 左侧导航与通用工具详情保留各自 owner |
 
 ## 包所有权
 
@@ -78,6 +89,8 @@ run start 记录语言、tool call、request-header seq、environment revision �
 ### 图表版本
 
 图表 record 包含稳定 chart ID、规范化 logical name、正数连续 version、不可变 `ImageAttachmentRef`、title 与可选 caption、成功的来源 run、pending 的 `save_chart` call、request-header seq、environment revision 与 fingerprint，以及创建时间。事件 envelope 提供该记录的 sequence。Phase 1 只接受 `image/png`，且来源必须是同一 folded log 中已有的成功 run；version 创建时间不得倒退。未来若要允许失败 run 的诊断 override，需要新的决策；MVP 不自行推断。
+
+客户端通过所属 Session 解析 provenance（溯源信息）：`requestHeaderSeq` 提供已记录的请求语境与安全 provider／模型 identity；tool call 提供执行发布的模型动作；来源 run 与 environment revision 提供执行身份；已有 Session actor 或 identity fact 在可用时提供用户归属。缺失的归属必须保持显式，绝不伪造成事件字段。
 
 ### Outcome
 
@@ -141,8 +154,8 @@ Science MVP 是受信任的本地 code execution，带 file-write confinement，
 | 2 | [Runtime Service Definition 与本地 Conda provider](../../implemented/architecture/2026-08-13-science-runtime-and-local-conda-provider.md) | fake-prefix CI coverage 与单独报告的 real-machine acceptance；owned tree 结算；environment prefix 保持不变 |
 | 3 | [Core compaction 前置修复、Science preset、prompt、state query 与 Python/R tool](2026-08-13-science-preset-environment-context-and-run-tools.md) | Science prompt/tool 只在 preset scope 内，所有实际使用的 environment context 均 durable 且 model-visible |
 | 4 | PNG save 与 Outcome publication consumer | immutable version 与 backward evidence validation 的 replay 结果相同 |
-| 5 | Generic Details extension 与 Science client UI | 四个 accessible tab 只渲染 projection truth；Standard session 没有入口 |
-| 6 | composition、built-package check 与本地 MVP source closure | 所有命名 source check 通过，fresh review 没有 HIGH 或 BLOCK finding；publish 仍需单独授权 |
+| 5 | Science 设置卡片、Generic Details extension 与 Science client UI | 精确解释器路径与公共来源默认值验证通过；四个 accessible tab 只渲染 projection truth；Standard session 没有 Science 入口 |
+| 6 | 共享 Web/Desktop composition、built-package check 与本地 MVP source closure | Standard 与 Science 通过两种载体运行且不复制产品逻辑；所有命名 source check 通过，fresh review 没有 HIGH 或 BLOCK finding；安装器、签名与 publish 仍属独立证据 |
 
 Phase 1 修改 Science domain package，并且只修改安全服务该领域所需的 generic projection/persistence seam：canonical private-checkpoint admission 与 state-to-row watermark、detached JSON value、显式 definition ownership、私有／公开 change 分离、exact-lifecycle durable drain、per-session cache serialization，以及 source-qualified log-revision identity。repository metadata 与架构文档随这些约定同步。它不会预建 Runtime、Tool、preset、attachment consumer 或 Client package，也不执行 UI、Conda、Python、R 或 process-runtime 工作。
 
@@ -152,7 +165,7 @@ Phase 1 修改 Science domain package，并且只修改安全服务该领域所�
 
 **把 Science truth 存进 tool result 或 UI database。** 拒绝，因为 cold resume 与 fork 会需要第二套 reconciliation protocol，且 UI 可能与权威 Session log 不一致。tool call arguments/result 保留 code 与 output；Science event 保留紧凑 provenance 与 state。
 
-**使用 CSSwitch 或 `dsh-external` 作为 Science implementation owner。** 拒绝，因为这些 repository 不拥有 DSH Outcome、chart-version、environment、conversation 或 Session projection semantics。Science source line 由 `omdsh-dev/dsh-science` 维护。
+**给 Science 增加 provider 或自定义 API 工作。** 拒绝，因为 DSH 已经拥有 provider 与模型选择能力。Science 消费该共享能力，不复制 CSSwitch 代理行为，也不建立第二套 provider stack。
 
 **从 persistent Python/R kernel 开始。** 拒绝，因为 kernel ownership、crash recovery、隐藏 mutable variable、package drift 与 process dispose 会在 durable product loop 尚未验证前主导 MVP。fresh process 加显式 `state/` 让 cross-call state 可见。
 
@@ -162,7 +175,7 @@ Phase 1 修改 Science domain package，并且只修改安全服务该领域所�
 
 ## 验收标准
 
-只有同时满足以下条件，完整 MVP 才可验收：Science preset 可 create、resume 与 fork；environment identity 与 drift 明确；Python/R execution 有界且有 owner；chart/Outcome provenance durable；四个 Details tab 可从 cold projection 重建；Standard behavior 不变；threat model 可见；命名的 source、composition、built-package、GUI 与 replay check 通过；fresh independent review 没有 HIGH 或 BLOCK finding。
+只有同时满足以下条件，完整 MVP 才可验收：Science preset 可 create、resume 与 fork；设置卡片验证精确 Python/R 路径与公共来源默认值且不修改环境；environment identity 与 drift 明确；Python/R execution 有界且有 owner；chart/Outcome provenance、请求语境和可用的用户归属可从同一 Session 持久化或解析；四个 Details tab 可从 cold projection 重建；Standard behavior 不变；Web 与 Desktop 都使用共享组合；threat model 可见；命名的 source、composition、built-package、GUI 与 replay check 通过；fresh independent review 没有 HIGH 或 BLOCK finding。
 
 CI fake-prefix evidence 与 real-machine Python/R acceptance 始终分开。未运行 real-machine 时报告 `NOT-RUN`，绝不从 unit test 推断。source closure 不证明 installed application、signing、notarization、release readiness 或任意 user environment 可用。
 
