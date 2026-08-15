@@ -32,7 +32,7 @@ jobs:
     outputs:
       prebuilds: ${{ steps.matrix.outputs.prebuilds }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - id: matrix
         run: echo "prebuilds=$(node ./scripts/github-matrix.mjs release-prebuild)" >> "$GITHUB_OUTPUT"
@@ -45,7 +45,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.prebuilds) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v4
         with:
@@ -84,7 +84,7 @@ jobs:
     needs: build-prebuilds
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v4
         with:
