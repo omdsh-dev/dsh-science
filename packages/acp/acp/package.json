@@ -32,7 +32,7 @@
   ],
   "license": "BSD-3-Clause",
   "dependencies": {
-    "@agentclientprotocol/sdk": "0.25.1",
+    "@agentclientprotocol/sdk": "1.2.1",
     "@deepseek-ai/schemastery": "workspace:^"
   },
   "peerDependencies": {
